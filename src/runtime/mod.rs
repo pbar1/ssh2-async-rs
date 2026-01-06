@@ -5,6 +5,10 @@ use std::future::Future;
 use std::io;
 use std::task::Poll;
 
+#[cfg(feature = "tokio")]
+pub use self::tokio::Tokio;
+#[cfg(feature = "tokio")]
+pub use self::tokio::TokioContext;
 use crate::consts::ERROR_EAGAIN;
 
 /// Async runtime used to process nonblocking IO readiness.

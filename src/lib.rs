@@ -6,7 +6,7 @@
 mod agent;
 mod channel;
 mod consts;
-mod runtime;
+pub mod runtime;
 mod session;
 mod sftp;
 
