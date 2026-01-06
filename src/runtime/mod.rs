@@ -5,7 +5,7 @@ use std::future::Future;
 use std::io;
 use std::task::Poll;
 
-use ssh2::Error;
+use crate::consts::ERROR_EAGAIN;
 
 /// Async runtime used to process nonblocking IO readiness.
 pub trait Runtime: Clone + Send + Sync {
@@ -15,7 +15,7 @@ pub trait Runtime: Clone + Send + Sync {
 
     /// Creates a runtime context from a session. Called once to when session is
     /// created.
-    fn create_context(&self, session: &ssh2::Session) -> Result<Self::Context, Error>;
+    fn create_context(&self, session: &ssh2::Session) -> Result<Self::Context, ssh2::Error>;
 
     /// Runs `func` with a session, retrying on EAGAIN after waiting for socket
     /// readiness.
@@ -23,10 +23,10 @@ pub trait Runtime: Clone + Send + Sync {
         ctx: &'a Self::Context,
         session: &'a ssh2::Session,
         func: F,
-    ) -> impl Future<Output = Result<T, Error>> + Send
+    ) -> impl Future<Output = Result<T, ssh2::Error>> + Send
     where
         T: Send,
-        F: FnMut(&ssh2::Session) -> Result<T, Error> + Send;
+        F: FnMut(&ssh2::Session) -> Result<T, ssh2::Error> + Send;
 
     /// Runs `func` with a mutable session, retrying on EAGAIN after waiting for
     /// socket readiness.
@@ -34,10 +34,10 @@ pub trait Runtime: Clone + Send + Sync {
         ctx: &'a Self::Context,
         session: &'a mut ssh2::Session,
         func: F,
-    ) -> impl Future<Output = Result<T, Error>> + Send
+    ) -> impl Future<Output = Result<T, ssh2::Error>> + Send
     where
         T: Send,
-        F: FnMut(&mut ssh2::Session) -> Result<T, Error> + Send;
+        F: FnMut(&mut ssh2::Session) -> Result<T, ssh2::Error> + Send;
 
     /// Runs `func`, retrying on [`io::ErrorKind::WouldBlock`] after waiting for
     /// readiness.
@@ -60,4 +60,12 @@ pub trait Runtime: Clone + Send + Sync {
     ) -> Poll<io::Result<T>>
     where
         F: FnMut() -> io::Result<T>;
+}
+
+pub(crate) fn would_block_ssh(error: &ssh2::Error) -> bool {
+    error.code() == ERROR_EAGAIN
+}
+
+pub(crate) fn would_block_io(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
 }
