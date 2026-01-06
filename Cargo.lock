@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "async-ssh2"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libssh2-sys",
+ "ssh2",
+ "tokio",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,16 +290,6 @@ dependencies = [
  "libc",
  "libssh2-sys",
  "parking_lot",
-]
-
-[[package]]
-name = "ssh2-async"
-version = "0.1.0"
-dependencies = [
- "futures",
- "libssh2-sys",
- "ssh2",
- "tokio",
 ]
 
 [[package]]

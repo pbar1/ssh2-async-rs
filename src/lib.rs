@@ -5,6 +5,9 @@
 
 mod agent;
 mod channel;
+mod consts;
 mod runtime;
 mod session;
 mod sftp;
+
+pub use ssh2;
