@@ -16,27 +16,34 @@ use crate::consts::ERROR_BAD_SOCKET;
 
 /// Tokio runtime context.
 ///
-/// Contains an [`AsyncFd`] wrapped within an [`Arc`] so it can be cheaply
+/// Contains an `AsyncFd` wrapped within an [`Arc`] so it can be cheaply
 /// cloned to session derivatives. This avoids repeated syscalls (ie,
 /// `epoll_ctl`) that would cause kernel lock contention under high concurrency.
 #[derive(Clone)]
 pub struct TokioContext {
+    session: ssh2::Session,
     fd: Arc<AsyncFd<RawFd>>,
 }
 
 impl RuntimeContext for TokioContext {
-    fn new(session: &ssh2::Session) -> Result<Self, Error> {
-        let fd = Arc::new(
+    fn new(session: ssh2::Session) -> Result<Self, Error> {
+        let fd =
             AsyncFd::with_interest(session.as_raw_fd(), Interest::READABLE | Interest::WRITABLE)
                 .map_err(|_| {
                     Error::new(ERROR_BAD_SOCKET, "failed extracting AsyncFd from session")
-                })?,
-        );
-        Ok(Self { fd })
+                })?;
+        Ok(Self {
+            session,
+            fd: Arc::new(fd),
+        })
     }
 
-    async fn wait_ready(&self, directions: BlockDirections) -> io::Result<()> {
-        match directions {
+    fn block_directions(&self) -> BlockDirections {
+        self.session.block_directions()
+    }
+
+    async fn wait_ready(&self) -> io::Result<()> {
+        match self.block_directions() {
             BlockDirections::None => tokio::task::yield_now().await,
             BlockDirections::Inbound => {
                 self.fd.readable().await?.clear_ready();
@@ -54,8 +61,8 @@ impl RuntimeContext for TokioContext {
         Ok(())
     }
 
-    fn poll_ready(&self, cx: &mut Context, directions: &BlockDirections) -> Poll<io::Result<()>> {
-        match directions {
+    fn poll_ready(&self, cx: &mut Context) -> Poll<io::Result<()>> {
+        match self.block_directions() {
             BlockDirections::None => {
                 cx.waker().wake_by_ref();
                 Poll::Pending

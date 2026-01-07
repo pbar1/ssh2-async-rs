@@ -22,57 +22,34 @@ use crate::consts::ERROR_EAGAIN;
 /// [`Session`]: crate::Session
 pub trait RuntimeContext: Clone + Send + Sync + Sized {
     /// Create runtime-specific context from a session.
-    fn new(session: &ssh2::Session) -> Result<Self, Error>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime context could not be extracted from the
+    /// session. This usually only happens if transport has not yet been set.
+    fn new(session: ssh2::Session) -> Result<Self, Error>;
+
+    /// Get the blocking direction of the session.
+    fn block_directions(&self) -> BlockDirections;
 
     /// Wait for session readiness.
-    fn wait_ready(
-        &self,
-        directions: BlockDirections,
-    ) -> impl Future<Output = io::Result<()>> + Send;
+    fn wait_ready(&self) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Poll for session readiness.
-    fn poll_ready(&self, cx: &mut Context, directions: &BlockDirections) -> Poll<io::Result<()>>;
+    fn poll_ready(&self, cx: &mut Context) -> Poll<io::Result<()>>;
 
-    /// Wrap a nonblocking session function with retries until it succeeds.
-    fn with_async<'a, T, F>(
-        &'a self,
-        session: &'a ssh2::Session,
-        mut func: F,
-    ) -> impl Future<Output = Result<T, Error>> + Send
+    /// Wrap a nonblocking function with retries until it succeeds.
+    fn with_async<T, F>(&self, mut func: F) -> impl Future<Output = Result<T, Error>> + Send
     where
         T: Send,
-        F: FnMut(&ssh2::Session) -> Result<T, Error> + Send,
+        F: FnMut() -> Result<T, Error> + Send,
     {
         async move {
             loop {
-                match func(session) {
+                match func() {
                     Ok(t) => return Ok(t),
                     Err(e) if would_block_ssh(&e) => self
-                        .wait_ready(session.block_directions())
-                        .await
-                        .map_err(|_| Error::new(ERROR_BAD_SOCKET, "socket wait failed"))?,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-    }
-
-    /// Like [`RuntimeContext::with_async`] but for mutable sessions.
-    fn with_async_mut<'a, T, F>(
-        &'a self,
-        session: &'a ssh2::Session,
-        mut func: F,
-    ) -> impl Future<Output = Result<T, Error>> + Send
-    where
-        T: Send,
-        F: FnMut(&ssh2::Session) -> Result<T, Error> + Send,
-    {
-        async move {
-            loop {
-                match func(session) {
-                    Ok(t) => return Ok(t),
-                    Err(e) if would_block_ssh(&e) => self
-                        .wait_ready(session.block_directions())
+                        .wait_ready()
                         .await
                         .map_err(|_| Error::new(ERROR_BAD_SOCKET, "socket wait failed"))?,
                     Err(e) => return Err(e),
@@ -85,25 +62,18 @@ pub trait RuntimeContext: Clone + Send + Sync + Sized {
     ///
     /// Used for implementing `AsyncRead` and `AsyncWrite` on channels and
     /// streams.
-    fn with_poll<T, F>(
-        &self,
-        cx: &mut Context<'_>,
-        session: &ssh2::Session,
-        mut func: F,
-    ) -> Poll<io::Result<T>>
+    fn with_poll<T, F>(&self, cx: &mut Context<'_>, mut func: F) -> Poll<io::Result<T>>
     where
         F: FnMut() -> io::Result<T>,
     {
         loop {
             match func() {
                 Ok(t) => return Poll::Ready(Ok(t)),
-                Err(e) if would_block_io(&e) => {
-                    match self.poll_ready(cx, &session.block_directions()) {
-                        Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
+                Err(e) if would_block_io(&e) => match self.poll_ready(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                },
                 Err(e) => return Poll::Ready(Err(e)),
             }
         }

@@ -2,7 +2,6 @@
 
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-#![allow(clippy::missing_errors_doc)]
 
 mod agent;
 mod channel;
