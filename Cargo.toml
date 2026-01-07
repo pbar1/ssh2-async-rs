@@ -1,6 +1,6 @@
 [package]
-name = "async-ssh2"
-version = "0.1.0"
+name = "ssh2-async"
+version = "0.0.0"
 edition = "2024"
 
 [features]
@@ -8,6 +8,6 @@ default = ["tokio"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-futures = "0.3"
-ssh2 = "0.9.5"
-tokio = { version = "1", optional = true, features = ["macros", "net", "rt"] }
+futures = { version = "0.3", default-features = false }
+ssh2 = { version = "0.9", default-features = false }
+tokio = { version = "1", optional = true, default-features = false, features = ["macros", "net", "rt"] }
