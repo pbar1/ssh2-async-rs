@@ -19,7 +19,7 @@ use crate::consts::ERROR_EAGAIN;
 /// Concrete implementations of this are shared among a [`Session`] and
 /// its derivatives.
 ///
-/// [`Session`]: `crate::Session`
+/// [`Session`]: crate::Session
 pub trait RuntimeContext: Clone + Send + Sync + Sized {
     /// Create runtime-specific context from a session.
     fn new(session: &ssh2::Session) -> Result<Self, Error>;

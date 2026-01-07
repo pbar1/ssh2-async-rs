@@ -8,6 +8,6 @@ default = ["tokio"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-futures = { version = "0.3", default-features = false }
+futures = { version = "0.3", default-features = false, features = ["std"] }
 ssh2 = { version = "0.9", default-features = false }
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "net", "rt"] }
