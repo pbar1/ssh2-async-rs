@@ -1,12 +1,10 @@
 # ssh2-async
 
-Runtime-agnostic async wrappers for [`ssh2`].
+Runtime-agnostic async wrappers for [`ssh2`][ssh2].
 
-This crate mirrors the `ssh2` API while making operations async by retrying
-nonblocking `libssh2` calls when the underlying socket becomes ready.
-
-Includes pluggable runtime support through the `RuntimeContext` trait. Tokio
-support is implemented and enabled by default.
+Includes pluggable runtime support through the `RuntimeContext` trait to
+intelligently support async without resorting to busy-waiting. [Tokio][tokio]
+support is implemented already and enabled by default.
 
 Also implements `futures::io::{AsyncRead, AsyncWrite}` for things that
 implement `std::io::{Read, Write}` in `ssh2`, such as channels and files.
@@ -42,3 +40,5 @@ async fn main() -> Result<(), ssh2::Error> {
 }
 ```
 
+[ssh2]: https://github.com/alexcrichton/ssh2-rs
+[tokio]: https://tokio.rs/
