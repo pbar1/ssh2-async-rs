@@ -1,19 +1,30 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use russh::Channel;
 use russh::ChannelId;
 use russh::keys::PrivateKey;
+use russh::keys::PublicKeyBase64;
+use russh::keys::agent::client::AgentClient;
 use russh::server::Auth;
 use russh::server::Config;
 use russh::server::Handler;
 use russh::server::Msg;
 use russh::server::Session;
 use tokio::net::TcpListener;
+use tokio::net::UnixListener;
+use tokio::net::UnixStream;
+use tokio::sync::OnceCell;
+use tokio_stream::wrappers::UnixListenerStream;
+
+type Result<T> = std::result::Result<T, russh::Error>;
 
 pub const USERNAME: &str = "username";
 pub const PASSWORD: &str = "password";
@@ -28,10 +39,31 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-type Result<T> = std::result::Result<T, russh::Error>;
+const USER_KEY: &str = r"
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACA+/q51/y/PfVFNDP2Z0j9j0829+sI3wHybdibXPzuqsQAAAJh/FAkdfxQJ
+HQAAAAtzc2gtZWQyNTUxOQAAACA+/q51/y/PfVFNDP2Z0j9j0829+sI3wHybdibXPzuqsQ
+AAAEBf9AF7cqXX+8dFnoAefD88l2TISDiuY7c2KLzhBPvZLj7+rnX/L899UU0M/ZnSP2PT
+zb36wjfAfJt2Jtc/O6qxAAAAFHNzaDItYXN5bmMtdGVzdC11c2VyAQ==
+-----END OPENSSH PRIVATE KEY-----
+";
+pub const USER_PUBLIC_KEY: &str =
+    r"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID7+rnX/L899UU0M/ZnSP2PTzb36wjfAfJt2Jtc/O6qx";
+
+static AGENT: OnceCell<AgentServer> = OnceCell::const_new();
+
+pub fn public_key_openssh(blob: &[u8]) -> Result<String> {
+    let key = russh::keys::key::parse_public_key(blob)?;
+    Ok(format!("{} {}", key.algorithm(), key.public_key_base64()))
+}
 
 pub fn server() -> Builder {
     Builder::default()
+}
+
+pub async fn agent() -> Result<&'static AgentServer> {
+    AGENT.get_or_try_init(AgentServer::spawn).await
 }
 
 pub async fn with_server<F, Fut, T>(f: F) -> Result<T>
@@ -40,6 +72,69 @@ where
     Fut: Future<Output = T>,
 {
     server().with_server(f).await
+}
+
+pub struct AgentServer {
+    socket_path: PathBuf,
+}
+
+impl AgentServer {
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    async fn spawn() -> Result<Self> {
+        let socket_path = std::env::temp_dir().join(format!(
+            "ssh2-async-testing-agent-{}.sock",
+            std::process::id()
+        ));
+        match std::fs::remove_file(&socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let agent_socket_path = socket_path.clone();
+        let _agent = std::thread::spawn(move || {
+            let startup_tx = ready_tx.clone();
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .and_then(|runtime| {
+                    runtime.block_on(async move {
+                        let listener = UnixListener::bind(agent_socket_path)?;
+                        let _ = startup_tx.send(Ok(()));
+                        let stream = UnixListenerStream::new(listener);
+                        let _ = russh::keys::agent::server::serve(stream, ()).await;
+                        Ok(())
+                    })
+                });
+
+            if let Err(error) = result {
+                let _ = ready_tx.send(Err(error));
+            }
+        });
+        ready_rx
+            .recv()
+            .map_err(|_| std::io::Error::other("test SSH agent thread stopped during startup"))??;
+
+        let key = PrivateKey::from_openssh(USER_KEY)?;
+        let stream = UnixStream::connect(&socket_path).await?;
+        let mut client = AgentClient::connect(stream);
+        client.add_identity(&key, &[]).await?;
+        if client.request_identities().await?.is_empty() {
+            return Err(russh::keys::Error::AgentFailure.into());
+        }
+
+        // Tests use a stable singleton agent, so setting this once is safe for
+        // agent-related tests in this process.
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", &socket_path);
+        }
+
+        Ok(Self { socket_path })
+    }
 }
 
 #[derive(Default)]
@@ -235,6 +330,18 @@ impl Handler for TestHandler {
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth> {
         if user == USERNAME && password == PASSWORD {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        _public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<Auth> {
+        if user == USERNAME {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
