@@ -13,3 +13,6 @@ tokio = ["dep:tokio"]
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ssh2 = { version = "0.9", default-features = false }
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "net", "rt"] }
+
+[dev-dependencies]
+russh = { version = "0.60", default-features = false, features = ["ring"] }

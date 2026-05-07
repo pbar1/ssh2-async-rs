@@ -16,6 +16,9 @@ use crate::Channel;
 use crate::Listener;
 use crate::RuntimeContext;
 use crate::Sftp;
+#[cfg(feature = "tokio")]
+use crate::TokioContext;
+use crate::consts::ERROR_BAD_SOCKET;
 
 /// Async wrapper for [`ssh2::Session`].
 pub struct Session<C: RuntimeContext> {
@@ -64,6 +67,18 @@ impl<C: RuntimeContext> Session<C> {
     /// Returns a mutable reference to the wrapped inner.
     pub const fn as_inner_mut(&mut self) -> &mut ssh2::Session {
         &mut self.inner
+    }
+}
+
+#[cfg(all(feature = "tokio", unix))]
+impl TryFrom<tokio::net::TcpStream> for Session<TokioContext> {
+    type Error = Error;
+
+    fn try_from(stream: tokio::net::TcpStream) -> Result<Self, Self::Error> {
+        let stream = stream
+            .into_std()
+            .map_err(|_| Error::new(ERROR_BAD_SOCKET, "failed converting Tokio TCP stream"))?;
+        Self::from_stream(stream)
     }
 }
 
