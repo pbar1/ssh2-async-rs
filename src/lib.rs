@@ -34,6 +34,7 @@ mod consts {
 
     pub const ERROR_EAGAIN: ErrorCode = ErrorCode::Session(-37);
     pub const ERROR_BAD_SOCKET: ErrorCode = ErrorCode::Session(-45);
+    pub const ERROR_INVAL: ErrorCode = ErrorCode::Session(-34);
 }
 
 /// Tests are adapted from the [`ssh2`] crate examples.
@@ -51,7 +52,7 @@ mod tests {
     type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     #[tokio::test]
-    async fn inspecting_ssh_agent() -> Result<()> {
+    async fn inspect_agent() -> Result<()> {
         let _agent = testing::agent().await?;
 
         testing::with_server(|server_addr| async move {
@@ -80,7 +81,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticating_with_ssh_agent() -> Result<()> {
+    async fn authenticate_agent() -> Result<()> {
         let _agent = testing::agent().await?;
 
         testing::with_server(|server_addr| async move {
@@ -90,11 +91,7 @@ mod tests {
             sess.handshake().await?;
 
             // Try to authenticate with the first identity in the agent.
-            let mut agent = sess.agent()?;
-            agent.connect()?;
-            agent.list_identities()?;
-            let identity = agent.identities()?.remove(0);
-            agent.userauth("username", &identity).await?;
+            sess.userauth_agent("username").await?;
 
             // Make sure we succeeded
             assert!(sess.authenticated());
@@ -105,7 +102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_with_password() -> Result<()> {
+    async fn authenticate_password() -> Result<()> {
         testing::with_server(|server_addr| async move {
             // Connect to the SSH server
             let tcp = TcpStream::connect(server_addr).await?;

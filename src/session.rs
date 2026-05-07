@@ -19,6 +19,7 @@ use crate::Sftp;
 #[cfg(feature = "tokio")]
 use crate::TokioContext;
 use crate::consts::ERROR_BAD_SOCKET;
+use crate::consts::ERROR_INVAL;
 
 /// Async wrapper for [`ssh2::Session`].
 pub struct Session<C: RuntimeContext> {
@@ -158,10 +159,23 @@ impl<C: RuntimeContext> Session<C> {
             .await
     }
 
+    // It is unsound to simply wrap `ssh2::Session::userauth_agent` with async
+    // like the rest of the methods since that would recreate the agent
+    // connection if called with retries, which is not reentrant safe. Instead
+    // we mimic the implementation in terms of our own async methods and avoid
+    // duplicating the agent connection.
     pub async fn userauth_agent(&self, username: &str) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.userauth_agent(username))
-            .await
+        let mut agent = self.agent()?;
+        agent.connect()?;
+        agent.list_identities()?;
+        let identities = agent.identities()?;
+        let Some(identity) = identities.first() else {
+            return Err(Error::new(
+                ERROR_INVAL,
+                "no identities found in the ssh agent",
+            ));
+        };
+        agent.userauth(username, identity).await
     }
 
     pub async fn auth_methods(&self, username: &str) -> Result<&str, Error> {

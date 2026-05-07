@@ -32,6 +32,9 @@ impl<C: RuntimeContext> Agent<C> {
 }
 
 /// Async wrappers
+///
+/// [`Agent::userauth`] is the one agent function that can be async-wrapped
+/// because it writes to the session.
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> Agent<C> {
     /// See [`ssh2::Agent::userauth`]
@@ -43,21 +46,22 @@ impl<C: RuntimeContext> Agent<C> {
 }
 
 /// Sync wrappers
+///
+/// `libssh2` SSH agent socket connections are inherently synchronous and can't
+/// be made async. The internal socket is not set to nonblocking and overriding
+/// this is not exposed.
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> Agent<C> {
-    // FIXME: Async
     /// See [`ssh2::Agent::connect`]
     pub fn connect(&mut self) -> Result<(), Error> {
         self.inner.connect()
     }
 
-    // FIXME: Async
     /// See [`ssh2::Agent::disconnect`]
     pub fn disconnect(&mut self) -> Result<(), Error> {
         self.inner.disconnect()
     }
 
-    // FIXME: Async
     /// See [`ssh2::Agent::list_identities`]
     pub fn list_identities(&mut self) -> Result<(), Error> {
         self.inner.list_identities()
