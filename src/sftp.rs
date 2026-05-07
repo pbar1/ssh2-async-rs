@@ -31,6 +31,21 @@ impl<C: RuntimeContext> Sftp<C> {
     pub(crate) const fn new(inner: ssh2::Sftp, ctx: C) -> Self {
         Self { inner, ctx }
     }
+
+    /// Returns the wrapped inner.
+    pub fn into_inner(self) -> ssh2::Sftp {
+        self.inner
+    }
+
+    /// Returns a reference to the wrapped inner.
+    pub const fn as_inner(&self) -> &ssh2::Sftp {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped inner.
+    pub const fn as_inner_mut(&mut self) -> &mut ssh2::Sftp {
+        &mut self.inner
+    }
 }
 
 /// Async wrappers
@@ -144,6 +159,21 @@ pub struct File<C: RuntimeContext> {
 impl<C: RuntimeContext> File<C> {
     pub(crate) const fn new(inner: ssh2::File, ctx: C) -> Self {
         Self { inner, ctx }
+    }
+
+    /// Returns the wrapped inner.
+    pub fn into_inner(self) -> ssh2::File {
+        self.inner
+    }
+
+    /// Returns a reference to the wrapped inner.
+    pub const fn as_inner(&self) -> &ssh2::File {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped inner.
+    pub const fn as_inner_mut(&mut self) -> &mut ssh2::File {
+        &mut self.inner
     }
 }
 

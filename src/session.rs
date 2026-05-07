@@ -50,6 +50,21 @@ impl<C: RuntimeContext> Session<C> {
         inner.set_tcp_stream(stream);
         Self::from_blocking(inner)
     }
+
+    /// Returns the wrapped inner.
+    pub fn into_inner(self) -> ssh2::Session {
+        self.inner
+    }
+
+    /// Returns a reference to the wrapped inner.
+    pub const fn as_inner(&self) -> &ssh2::Session {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped inner.
+    pub const fn as_inner_mut(&mut self) -> &mut ssh2::Session {
+        &mut self.inner
+    }
 }
 
 /// Async wrappers

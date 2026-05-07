@@ -14,6 +14,21 @@ impl<C: RuntimeContext> Listener<C> {
     pub(crate) const fn new(inner: ssh2::Listener, ctx: C) -> Self {
         Self { inner, ctx }
     }
+
+    /// Returns the wrapped inner.
+    pub fn into_inner(self) -> ssh2::Listener {
+        self.inner
+    }
+
+    /// Returns a reference to the wrapped inner.
+    pub const fn as_inner(&self) -> &ssh2::Listener {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped inner.
+    pub const fn as_inner_mut(&mut self) -> &mut ssh2::Listener {
+        &mut self.inner
+    }
 }
 
 /// Async wrappers

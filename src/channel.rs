@@ -27,6 +27,21 @@ impl<C: RuntimeContext> Channel<C> {
     pub(crate) const fn new(inner: ssh2::Channel, ctx: C) -> Self {
         Self { inner, ctx }
     }
+
+    /// Returns the wrapped inner.
+    pub fn into_inner(self) -> ssh2::Channel {
+        self.inner
+    }
+
+    /// Returns a reference to the wrapped inner.
+    pub const fn as_inner(&self) -> &ssh2::Channel {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped inner.
+    pub const fn as_inner_mut(&mut self) -> &mut ssh2::Channel {
+        &mut self.inner
+    }
 }
 
 /// Async wrappers
@@ -194,6 +209,21 @@ pub struct Stream<C: RuntimeContext> {
 impl<C: RuntimeContext> Stream<C> {
     pub(crate) const fn new(inner: ssh2::Stream, ctx: C) -> Self {
         Self { inner, ctx }
+    }
+
+    /// Returns the wrapped inner.
+    pub fn into_inner(self) -> ssh2::Stream {
+        self.inner
+    }
+
+    /// Returns a reference to the wrapped inner.
+    pub const fn as_inner(&self) -> &ssh2::Stream {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped inner.
+    pub const fn as_inner_mut(&mut self) -> &mut ssh2::Stream {
+        &mut self.inner
     }
 }
 
