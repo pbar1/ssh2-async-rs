@@ -1,6 +1,6 @@
 [package]
 name = "ssh2-async"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Runtime-agnostic async wrapper for ssh2"
