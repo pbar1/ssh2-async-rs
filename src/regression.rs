@@ -320,6 +320,42 @@ async fn cancelled_session_request_does_not_poison_existing_channels() -> Result
 }
 
 #[tokio::test]
+async fn cancelled_session_request_keeps_supported_algorithms_available() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let mut open = Box::pin(session.channel_session());
+        assert!(futures::poll!(&mut open).is_pending());
+        drop(open);
+        let expected = session.as_inner().supported_algs(ssh2::MethodType::Kex)?;
+        assert_eq!(
+            session.supported_algs(ssh2::MethodType::Kex).await?,
+            expected
+        );
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn cancelled_session_request_keeps_algorithm_preferences_available() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let algorithm = session.as_inner().supported_algs(ssh2::MethodType::Kex)?[0];
+        let mut open = Box::pin(session.channel_session());
+        assert!(futures::poll!(&mut open).is_pending());
+        drop(open);
+        session
+            .as_inner()
+            .method_pref(ssh2::MethodType::Kex, algorithm)?;
+        session
+            .method_pref(ssh2::MethodType::Kex, algorithm)
+            .await?;
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
 async fn abandoned_sftp_read_rejects_conflicts_without_stranding_handles() -> Result {
     testing::server()
         .file("a", "A")

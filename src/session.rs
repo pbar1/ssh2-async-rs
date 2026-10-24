@@ -232,7 +232,8 @@ impl<C: RuntimeContext> Session<C> {
     }
 
     pub async fn method_pref(&self, method_type: MethodType, prefs: &str) -> Result<(), Error> {
-        self.with_request(|| self.inner.method_pref(method_type, prefs))
+        self.ctx
+            .with_async(|| self.inner.method_pref(method_type, prefs))
             .await
     }
 
@@ -240,7 +241,8 @@ impl<C: RuntimeContext> Session<C> {
         &self,
         method_type: MethodType,
     ) -> Result<Vec<&'static str>, Error> {
-        self.with_request(|| self.inner.supported_algs(method_type))
+        self.ctx
+            .with_async(|| self.inner.supported_algs(method_type))
             .await
     }
 
