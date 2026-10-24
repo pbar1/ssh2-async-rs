@@ -1,0 +1,4 @@
+- Keep changes small. Preserve the runtime abstraction and optional Tokio support.
+- Run `cargo xtask ci` after the final edit before declaring work complete.
+- Explicitly report checks that could not run.
+- Verify Actions for the pushed commit before claiming CI passed.
