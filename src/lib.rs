@@ -10,7 +10,7 @@ mod listener;
 mod runtime;
 mod session;
 mod sftp;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(dead_code)]
 mod testing;
 mod write;
@@ -22,7 +22,7 @@ pub use self::channel::Channel;
 pub use self::channel::Stream;
 pub use self::listener::Listener;
 pub use self::runtime::RuntimeContext;
-#[cfg(feature = "tokio")]
+#[cfg(all(feature = "tokio", unix))]
 pub use self::runtime::TokioContext;
 #[cfg(all(feature = "tokio", unix))]
 pub use self::runtime::TokioTransport;
@@ -42,7 +42,7 @@ mod consts {
 }
 
 /// Tests are adapted from the [`ssh2`] crate examples.
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio", unix))]
 mod tests {
     use std::path::Path;
 
@@ -199,3 +199,6 @@ mod tests {
 
 #[cfg(all(test, feature = "tokio", unix))]
 mod regression;
+
+#[cfg(all(test, unix))]
+mod runtime_tests;

@@ -16,7 +16,7 @@ use crate::Channel;
 use crate::Listener;
 use crate::RuntimeContext;
 use crate::Sftp;
-#[cfg(feature = "tokio")]
+#[cfg(all(feature = "tokio", unix))]
 use crate::TokioContext;
 use crate::consts::ERROR_BAD_SOCKET;
 use crate::consts::ERROR_INVAL;

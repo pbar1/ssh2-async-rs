@@ -1,4 +1,4 @@
-#[cfg(feature = "tokio")]
+#[cfg(all(feature = "tokio", unix))]
 mod tokio;
 
 use std::future::Future;
@@ -9,7 +9,7 @@ use std::task::Poll;
 use ssh2::BlockDirections;
 use ssh2::Error;
 
-#[cfg(feature = "tokio")]
+#[cfg(all(feature = "tokio", unix))]
 pub use self::tokio::TokioContext;
 #[cfg(all(feature = "tokio", unix))]
 pub use self::tokio::TokioTransport;
@@ -24,6 +24,24 @@ use crate::consts::ERROR_EAGAIN;
 /// [`Session`]: crate::Session
 pub trait RuntimeContext: Clone + Send + Sync + Sized {
     /// Owned transport accepted by this runtime.
+    ///
+    /// Transports must be safe to move with the native session:
+    ///
+    /// ```compile_fail
+    /// use std::{io, rc::Rc, task::{Context, Poll}};
+    /// use ssh2_async::{RuntimeContext, ssh2::{BlockDirections, Error, Session}};
+    /// #[derive(Clone)]
+    /// struct Local;
+    /// impl RuntimeContext for Local {
+    ///     type Transport = Rc<()>;
+    ///     fn new(_: Session, _: Self::Transport) -> Result<Self, Error> { Ok(Self) }
+    ///     fn block_directions(&self) -> BlockDirections { BlockDirections::None }
+    ///     async fn wait_ready(&self) -> io::Result<()> { Ok(()) }
+    ///     fn poll_ready(&self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+    ///         Poll::Ready(Ok(()))
+    ///     }
+    /// }
+    /// ```
     type Transport: Send;
 
     /// Install the transport and create runtime-specific context for a session.
