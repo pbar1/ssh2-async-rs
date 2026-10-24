@@ -40,7 +40,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+
+      - name: Check library without default features
+        run: cargo check --locked --no-default-features --lib
+
+      - name: Test without default features
+        run: cargo test --locked --no-default-features
 
       - name: Clippy
         run: cargo clippy --all-targets --no-deps -- -D warnings
