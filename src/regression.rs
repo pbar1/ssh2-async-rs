@@ -298,6 +298,68 @@ async fn concurrent_session_opens_keep_their_requests() -> Result {
 }
 
 #[tokio::test]
+async fn cancelled_agent_authentication_blocks_agent_and_session_requests() -> Result {
+    testing::agent().await?;
+    for (cancel_first, through_session) in [(false, false), (true, false), (true, true)] {
+        testing::with_server(|addr| async move {
+            let mut session = Session::try_from(tokio::net::TcpStream::connect(addr).await?)?;
+            session.handshake().await?;
+            let mut agent = session.agent()?;
+            agent.connect()?;
+            agent.list_identities()?;
+            let identities = agent.identities()?;
+            if cancel_first {
+                let mut first = Box::pin(agent.userauth(testing::USERNAME, &identities[0]));
+                assert!(futures::poll!(&mut first).is_pending());
+                drop(first);
+            }
+            let rejected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                if through_session {
+                    session.userauth_agent("rejected").await
+                } else {
+                    agent.userauth("rejected", &identities[0]).await
+                }
+            })
+            .await?;
+            assert!(
+                rejected.is_err(),
+                "invalid username accepted: cancelled={cancel_first}, session={through_session}"
+            );
+            assert!(!session.authenticated());
+            if cancel_first {
+                assert_eq!(rejected.unwrap_err().code(), ssh2::ErrorCode::Session(-39));
+            }
+            Result::Ok(())
+        })
+        .await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_authentication_gates_agent_requests() -> Result {
+    testing::agent().await?;
+    testing::with_server(|addr| async move {
+        let mut session = Session::try_from(tokio::net::TcpStream::connect(addr).await?)?;
+        session.handshake().await?;
+        let mut agent = session.agent()?;
+        agent.connect()?;
+        agent.list_identities()?;
+        let identities = agent.identities()?;
+        let mut first = Box::pin(session.userauth_password(testing::USERNAME, testing::PASSWORD));
+        assert!(futures::poll!(&mut first).is_pending());
+        let mut next = Box::pin(agent.userauth("rejected", &identities[0]));
+        assert!(futures::poll!(&mut next).is_pending());
+        drop(first);
+        let rejected = tokio::time::timeout(std::time::Duration::from_secs(2), next).await?;
+        assert_eq!(rejected.unwrap_err().code(), ssh2::ErrorCode::Session(-39));
+        assert!(!session.authenticated());
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
 async fn cancelled_session_request_does_not_poison_existing_channels() -> Result {
     testing::server()
         .exec("data", testing::ExecResponse::stdout("ready"))

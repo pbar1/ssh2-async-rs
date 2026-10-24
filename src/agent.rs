@@ -7,12 +7,21 @@ use crate::RuntimeContext;
 pub struct Agent<C: RuntimeContext> {
     inner: ssh2::Agent,
     ctx: C,
+    requests: std::sync::Arc<futures::lock::Mutex<bool>>,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Agent<C> {
-    pub(crate) const fn new(inner: ssh2::Agent, ctx: C) -> Self {
-        Self { inner, ctx }
+    pub(crate) const fn new(
+        inner: ssh2::Agent,
+        ctx: C,
+        requests: std::sync::Arc<futures::lock::Mutex<bool>>,
+    ) -> Self {
+        Self {
+            inner,
+            ctx,
+            requests,
+        }
     }
 
     /// Returns the wrapped inner.
@@ -39,9 +48,10 @@ impl<C: RuntimeContext> Agent<C> {
 impl<C: RuntimeContext> Agent<C> {
     /// See [`ssh2::Agent::userauth`]
     pub async fn userauth(&self, username: &str, identity: &PublicKey) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.userauth(username, identity))
-            .await
+        crate::runtime::request::with_request(&self.ctx, &self.requests, || {
+            self.inner.userauth(username, identity)
+        })
+        .await
     }
 }
 

@@ -31,7 +31,7 @@ use crate::consts::ERROR_INVAL;
 pub struct Session<C: RuntimeContext> {
     inner: ssh2::Session,
     ctx: C,
-    requests: futures::lock::Mutex<bool>,
+    requests: std::sync::Arc<futures::lock::Mutex<bool>>,
     channel_requests: std::sync::Arc<futures::lock::Mutex<bool>>,
 }
 
@@ -63,7 +63,7 @@ impl<C: RuntimeContext> Session<C> {
         Ok(Self {
             inner,
             ctx,
-            requests: futures::lock::Mutex::new(false),
+            requests: std::sync::Arc::new(futures::lock::Mutex::new(false)),
             channel_requests: std::sync::Arc::new(futures::lock::Mutex::new(false)),
         })
     }
@@ -376,7 +376,7 @@ impl<C: RuntimeContext> Session<C> {
 impl<C: RuntimeContext> Session<C> {
     pub fn agent(&self) -> Result<Agent<C>, Error> {
         let agent = self.inner.agent()?;
-        Ok(Agent::new(agent, self.ctx.clone()))
+        Ok(Agent::new(agent, self.ctx.clone(), self.requests.clone()))
     }
 
     pub fn known_hosts(&self) -> Result<KnownHosts, Error> {
