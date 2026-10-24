@@ -88,7 +88,22 @@ impl<C: RuntimeContext> Sftp<C> {
         dirname: T,
     ) -> Result<Vec<(PathBuf, FileStat)>, Error> {
         let dirname = dirname.as_ref();
-        self.ctx.with_async(|| self.inner.readdir(dirname)).await
+        let mut directory = self.opendir(dirname).await?;
+        let mut entries = Vec::new();
+        let result = loop {
+            match directory.readdir().await {
+                Ok((name, stat)) if name != Path::new(".") && name != Path::new("..") => {
+                    entries.push((dirname.join(name), stat));
+                }
+                Ok(_) => {}
+                Err(error) if error.code() == ssh2::ErrorCode::Session(-16) => break Ok(entries),
+                Err(error) => break Err(error),
+            }
+        };
+        let closed = directory.close().await;
+        let entries = result?;
+        closed?;
+        Ok(entries)
     }
 
     pub async fn mkdir(&self, filename: &Path, mode: i32) -> Result<(), Error> {

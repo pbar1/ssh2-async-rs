@@ -90,3 +90,16 @@ async fn seek_uses_remote_size_and_rejects_negative_offsets() -> Result {
     })
     .await?
 }
+
+#[tokio::test]
+async fn readdir_yields_while_waiting_for_entries() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let sftp = session.sftp().await?;
+        let entries = sftp.readdir(".").await;
+        tokio::task::spawn_blocking(move || drop(sftp)).await?;
+        assert!(entries?.is_empty());
+        Ok(())
+    })
+    .await?
+}
