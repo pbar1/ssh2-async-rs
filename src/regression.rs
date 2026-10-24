@@ -276,3 +276,42 @@ fn handles_remain_send_and_sync() {
     check::<crate::Stream<TokioContext>>();
     check::<crate::File<TokioContext>>();
 }
+
+#[tokio::test]
+async fn concurrent_session_opens_keep_their_requests() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let mut valid = Box::pin(session.channel_session());
+        assert!(futures::poll!(&mut valid).is_pending());
+        let (invalid, valid) = futures::join!(
+            session.channel_open("invalid-channel-type", 65536, 32768, None),
+            valid,
+        );
+        assert!(valid.is_ok());
+        assert!(invalid.is_err());
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn cancelled_session_request_does_not_poison_existing_channels() -> Result {
+    testing::server()
+        .exec("data", testing::ExecResponse::stdout("ready"))
+        .with_server(|addr| async move {
+            let session = connect(addr).await?;
+            let mut channel = session.channel_session().await?;
+            let mut open = Box::pin(session.channel_session());
+            assert!(futures::poll!(&mut open).is_pending());
+            drop(open);
+            let next = session.channel_session().await;
+            let rejected = next.as_ref().err().map(ssh2::Error::code);
+            channel.exec("data").await?;
+            let mut actual = Vec::new();
+            channel.read_to_end(&mut actual).await?;
+            assert_eq!(rejected, Some(ssh2::ErrorCode::Session(-39)));
+            assert_eq!(actual, b"ready");
+            Ok(())
+        })
+        .await?
+}

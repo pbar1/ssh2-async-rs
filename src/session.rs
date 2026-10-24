@@ -22,9 +22,16 @@ use crate::consts::ERROR_BAD_SOCKET;
 use crate::consts::ERROR_INVAL;
 
 /// Async wrapper for [`ssh2::Session`].
+///
+/// Session requests are serialized because libssh2 retains request state across
+/// `EAGAIN`. Cancelling one after it starts prevents further session requests;
+/// existing channels remain usable. Finish pending writes before issuing other
+/// requests: libssh2 can retain a partially sent packet for the whole
+/// connection.
 pub struct Session<C: RuntimeContext> {
     inner: ssh2::Session,
     ctx: C,
+    requests: futures::lock::Mutex<bool>,
 }
 
 /// Constructors and non-wrapping functions
@@ -52,7 +59,11 @@ impl<C: RuntimeContext> Session<C> {
             .try_into()
             .map_err(|_| Error::new(ERROR_BAD_SOCKET, "failed converting transport"))?;
         let ctx = C::new(inner.clone(), transport)?;
-        Ok(Self { inner, ctx })
+        Ok(Self {
+            inner,
+            ctx,
+            requests: futures::lock::Mutex::new(false),
+        })
     }
 
     /// Creates an async session from the given transport stream.
@@ -98,13 +109,34 @@ impl TryFrom<tokio::net::TcpStream> for Session<TokioContext> {
 /// Async wrappers
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> Session<C> {
+    async fn with_request<T: Send>(
+        &self,
+        mut func: impl FnMut() -> Result<T, Error> + Send,
+    ) -> Result<T, Error> {
+        let mut pending = self.requests.lock().await;
+        if *pending {
+            return Err(Error::new(
+                ssh2::ErrorCode::Session(-39),
+                "previous session request was cancelled; create a new session",
+            ));
+        }
+        self.ctx
+            .with_async(|| {
+                let result = func();
+                *pending =
+                    matches!(&result, Err(error) if error.code() == crate::consts::ERROR_EAGAIN);
+                result
+            })
+            .await
+    }
+
     pub async fn handshake(&mut self) -> Result<(), Error> {
-        self.ctx.with_async(|| self.inner.handshake()).await
+        let mut inner = self.inner.clone();
+        self.with_request(|| inner.handshake()).await
     }
 
     pub async fn userauth_password(&self, username: &str, password: &str) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.userauth_password(username, password))
+        self.with_request(|| self.inner.userauth_password(username, password))
             .await
     }
 
@@ -115,12 +147,11 @@ impl<C: RuntimeContext> Session<C> {
         privatekey: &Path,
         passphrase: Option<&str>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| {
-                self.inner
-                    .userauth_pubkey_file(username, pubkey, privatekey, passphrase)
-            })
-            .await
+        self.with_request(|| {
+            self.inner
+                .userauth_pubkey_file(username, pubkey, privatekey, passphrase)
+        })
+        .await
     }
 
     pub async fn userauth_pubkey_memory(
@@ -130,12 +161,11 @@ impl<C: RuntimeContext> Session<C> {
         privatekeydata: &str,
         passphrase: Option<&str>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| {
-                self.inner
-                    .userauth_pubkey_memory(username, pubkeydata, privatekeydata, passphrase)
-            })
-            .await
+        self.with_request(|| {
+            self.inner
+                .userauth_pubkey_memory(username, pubkeydata, privatekeydata, passphrase)
+        })
+        .await
     }
 
     pub async fn userauth_hostbased_file(
@@ -147,18 +177,17 @@ impl<C: RuntimeContext> Session<C> {
         hostname: &str,
         local_username: Option<&str>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| {
-                self.inner.userauth_hostbased_file(
-                    username,
-                    publickey,
-                    privatekey,
-                    passphrase,
-                    hostname,
-                    local_username,
-                )
-            })
-            .await
+        self.with_request(|| {
+            self.inner.userauth_hostbased_file(
+                username,
+                publickey,
+                privatekey,
+                passphrase,
+                hostname,
+                local_username,
+            )
+        })
+        .await
     }
 
     pub async fn userauth_keyboard_interactive<P: KeyboardInteractivePrompt + Send>(
@@ -166,8 +195,7 @@ impl<C: RuntimeContext> Session<C> {
         username: &str,
         prompter: &mut P,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.userauth_keyboard_interactive(username, prompter))
+        self.with_request(|| self.inner.userauth_keyboard_interactive(username, prompter))
             .await
     }
 
@@ -177,7 +205,7 @@ impl<C: RuntimeContext> Session<C> {
     // we mimic the implementation in terms of our own async methods and avoid
     // duplicating the agent connection.
     pub async fn userauth_agent(&self, username: &str) -> Result<(), Error> {
-        let mut agent = self.agent()?;
+        let mut agent = self.inner.agent()?;
         agent.connect()?;
         agent.list_identities()?;
         let identities = agent.identities()?;
@@ -187,18 +215,17 @@ impl<C: RuntimeContext> Session<C> {
                 "no identities found in the ssh agent",
             ));
         };
-        agent.userauth(username, identity).await
+        self.with_request(|| agent.userauth(username, identity))
+            .await
     }
 
     pub async fn auth_methods(&self, username: &str) -> Result<&str, Error> {
-        self.ctx
-            .with_async(|| self.inner.auth_methods(username))
+        self.with_request(|| self.inner.auth_methods(username))
             .await
     }
 
     pub async fn method_pref(&self, method_type: MethodType, prefs: &str) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.method_pref(method_type, prefs))
+        self.with_request(|| self.inner.method_pref(method_type, prefs))
             .await
     }
 
@@ -206,13 +233,12 @@ impl<C: RuntimeContext> Session<C> {
         &self,
         method_type: MethodType,
     ) -> Result<Vec<&'static str>, Error> {
-        self.ctx
-            .with_async(|| self.inner.supported_algs(method_type))
+        self.with_request(|| self.inner.supported_algs(method_type))
             .await
     }
 
     pub async fn channel_session(&self) -> Result<Channel<C>, Error> {
-        let channel = self.ctx.with_async(|| self.inner.channel_session()).await?;
+        let channel = self.with_request(|| self.inner.channel_session()).await?;
         Ok(Channel::new(channel, self.ctx.clone()))
     }
 
@@ -223,8 +249,7 @@ impl<C: RuntimeContext> Session<C> {
         src: Option<(&str, u16)>,
     ) -> Result<Channel<C>, Error> {
         let channel = self
-            .ctx
-            .with_async(|| self.inner.channel_direct_tcpip(host, port, src))
+            .with_request(|| self.inner.channel_direct_tcpip(host, port, src))
             .await?;
         Ok(Channel::new(channel, self.ctx.clone()))
     }
@@ -235,8 +260,7 @@ impl<C: RuntimeContext> Session<C> {
         src: Option<(&str, u16)>,
     ) -> Result<Channel<C>, Error> {
         let channel = self
-            .ctx
-            .with_async(|| self.inner.channel_direct_streamlocal(socket_path, src))
+            .with_request(|| self.inner.channel_direct_streamlocal(socket_path, src))
             .await?;
         Ok(Channel::new(channel, self.ctx.clone()))
     }
@@ -248,8 +272,7 @@ impl<C: RuntimeContext> Session<C> {
         queue_maxsize: Option<u32>,
     ) -> Result<(Listener<C>, u16), Error> {
         let (listener, port) = self
-            .ctx
-            .with_async(|| {
+            .with_request(|| {
                 self.inner
                     .channel_forward_listen(remote_port, host, queue_maxsize)
             })
@@ -265,8 +288,7 @@ impl<C: RuntimeContext> Session<C> {
         message: Option<&str>,
     ) -> Result<Channel<C>, Error> {
         let channel = self
-            .ctx
-            .with_async(|| {
+            .with_request(|| {
                 self.inner
                     .channel_open(channel_type, window_size, packet_size, message)
             })
@@ -275,7 +297,7 @@ impl<C: RuntimeContext> Session<C> {
     }
 
     pub async fn scp_recv(&self, path: &Path) -> Result<(Channel<C>, ScpFileStat), Error> {
-        let (channel, stat) = self.ctx.with_async(|| self.inner.scp_recv(path)).await?;
+        let (channel, stat) = self.with_request(|| self.inner.scp_recv(path)).await?;
         Ok((Channel::new(channel, self.ctx.clone()), stat))
     }
 
@@ -287,19 +309,18 @@ impl<C: RuntimeContext> Session<C> {
         times: Option<(u64, u64)>,
     ) -> Result<Channel<C>, Error> {
         let channel = self
-            .ctx
-            .with_async(|| self.inner.scp_send(remote_path, mode, size, times))
+            .with_request(|| self.inner.scp_send(remote_path, mode, size, times))
             .await?;
         Ok(Channel::new(channel, self.ctx.clone()))
     }
 
     pub async fn sftp(&self) -> Result<Sftp<C>, Error> {
-        let sftp = self.ctx.with_async(|| self.inner.sftp()).await?;
+        let sftp = self.with_request(|| self.inner.sftp()).await?;
         Ok(Sftp::new(sftp, self.ctx.clone()))
     }
 
     pub async fn keepalive_send(&self) -> Result<u32, Error> {
-        self.ctx.with_async(|| self.inner.keepalive_send()).await
+        self.with_request(|| self.inner.keepalive_send()).await
     }
 
     pub async fn disconnect(
@@ -308,8 +329,7 @@ impl<C: RuntimeContext> Session<C> {
         description: &str,
         lang: Option<&str>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.disconnect(reason, description, lang))
+        self.with_request(|| self.inner.disconnect(reason, description, lang))
             .await
     }
 }
