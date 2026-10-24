@@ -239,11 +239,32 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for File<C> {
 impl<C: RuntimeContext + Unpin> AsyncSeek for File<C> {
     fn poll_seek(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        // Seek is a local operation in libssh2, there is no network IO
         let this = self.get_mut();
-        Poll::Ready(this.inner.seek(pos))
+        let (base, offset) = match pos {
+            SeekFrom::Start(position) => {
+                return Poll::Ready(this.inner.seek(SeekFrom::Start(position)));
+            }
+            SeekFrom::Current(offset) => (this.inner.stream_position()?, offset),
+            SeekFrom::End(offset) => {
+                let stat = std::task::ready!(
+                    this.ctx
+                        .with_poll(cx, || this.inner.stat().map_err(io::Error::from))
+                )?;
+                let Some(size) = stat.size else {
+                    return Poll::Ready(Err(io::Error::other("file size unavailable")));
+                };
+                (size, offset)
+            }
+        };
+        let Some(position) = base.checked_add_signed(offset) else {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid seek offset",
+            )));
+        };
+        Poll::Ready(this.inner.seek(SeekFrom::Start(position)))
     }
 }

@@ -69,3 +69,24 @@ async fn closing_stream_sends_eof() -> Result {
     })
     .await?
 }
+
+#[tokio::test]
+async fn seek_uses_remote_size_and_rejects_negative_offsets() -> Result {
+    use std::io::SeekFrom;
+
+    use futures::AsyncSeekExt;
+
+    testing::with_sftp_server(|addr| async move {
+        let session = connect(addr).await?;
+        let sftp = session.sftp().await?;
+        let mut file = sftp.open("file").await?;
+        let negative = file.seek(SeekFrom::Current(-1)).await;
+        file.seek(SeekFrom::Start(0)).await?;
+        let end = file.seek(SeekFrom::End(-2)).await;
+        file.close().await?;
+        assert!(negative.is_err(), "{negative:?}");
+        assert_eq!(end?, 10);
+        Ok(())
+    })
+    .await?
+}
