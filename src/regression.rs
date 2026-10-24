@@ -103,3 +103,79 @@ async fn readdir_yields_while_waiting_for_entries() -> Result {
     })
     .await?
 }
+
+#[tokio::test]
+async fn outgoing_window_does_not_block_channel_or_stream_reads() -> Result {
+    for stream in [false, true] {
+        testing::server()
+            .window_size(1)
+            .exec(
+                "duplex",
+                testing::ExecResponse {
+                    keep_open: true,
+                    ..testing::ExecResponse::stdout("ready")
+                },
+            )
+            .with_server(|addr| async move {
+                let session = connect(addr).await?;
+                let mut channel = session.channel_session().await?;
+                channel.exec("duplex").await?;
+                assert_eq!(channel.write(b"12").await?, 1);
+                let mut input = [0; 5];
+                let read = async {
+                    if stream {
+                        channel.stream(0).read_exact(&mut input).await
+                    } else {
+                        channel.read_exact(&mut input).await
+                    }
+                };
+                tokio::time::timeout(std::time::Duration::from_millis(200), read).await??;
+                assert_eq!(&input, b"ready");
+                Result::Ok(())
+            })
+            .await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_eof_wait_keeps_other_channels_usable() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let mut channel = session.channel_session().await?;
+        let mut wait = Box::pin(channel.wait_eof());
+        assert!(futures::poll!(&mut wait).is_pending());
+        drop(wait);
+        session.channel_session().await?;
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn both_close_interfaces_can_be_resumed_after_cancellation() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        for inherent in [true, false] {
+            let mut channel = session.channel_session().await?;
+            {
+                let mut close = Box::pin(async {
+                    if inherent {
+                        channel.close().await.map_err(std::io::Error::from)
+                    } else {
+                        AsyncWriteExt::close(&mut channel).await
+                    }
+                });
+                assert!(futures::poll!(&mut close).is_pending());
+            }
+            if inherent {
+                channel.close().await?;
+            } else {
+                AsyncWriteExt::close(&mut channel).await?;
+            }
+            session.channel_session().await?;
+        }
+        Ok(())
+    })
+    .await?
+}

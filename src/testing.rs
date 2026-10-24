@@ -129,9 +129,15 @@ impl AgentServer {
 pub struct Builder {
     exec: HashMap<String, ExecResponse>,
     files: HashMap<String, Vec<u8>>,
+    window_size: Option<u32>,
 }
 
 impl Builder {
+    pub fn window_size(mut self, size: u32) -> Self {
+        self.window_size = Some(size);
+        self
+    }
+
     #[must_use]
     pub fn exec(mut self, command: impl Into<String>, response: ExecResponse) -> Self {
         self.exec.insert(command.into(), response);
@@ -147,6 +153,9 @@ impl Builder {
     pub async fn bind(self) -> Result<Server> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let config = Arc::new(Config {
+            window_size: self
+                .window_size
+                .unwrap_or_else(|| Config::default().window_size),
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             inactivity_timeout: Some(Duration::from_secs(30)),
@@ -217,6 +226,7 @@ pub struct ExecResponse {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub status: u32,
+    pub keep_open: bool,
 }
 
 impl ExecResponse {
@@ -225,6 +235,7 @@ impl ExecResponse {
             stdout: stdout.as_ref().to_vec(),
             stderr: Vec::new(),
             status: 0,
+            keep_open: false,
         }
     }
 }
@@ -261,7 +272,11 @@ impl TestHandler {
         if !response.stderr.is_empty() {
             session.extended_data(channel, 1, response.stderr.clone())?;
         }
-        finish_channel(channel, response.status, session)
+        if response.keep_open {
+            Ok(())
+        } else {
+            finish_channel(channel, response.status, session)
+        }
     }
 
     fn start_scp_sink(
@@ -589,6 +604,7 @@ fn unknown_command(command: &str) -> ExecResponse {
         stdout: Vec::new(),
         stderr: format!("unknown command: {command}\n").into_bytes(),
         status: 127,
+        keep_open: false,
     }
 }
 
