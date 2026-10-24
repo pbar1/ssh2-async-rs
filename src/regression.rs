@@ -179,3 +179,100 @@ async fn both_close_interfaces_can_be_resumed_after_cancellation() -> Result {
     })
     .await?
 }
+
+#[tokio::test]
+async fn cancelled_file_write_keeps_each_payload_and_count() -> Result {
+    use std::io::SeekFrom;
+
+    use futures::AsyncSeekExt;
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let sftp = session.sftp().await?;
+        let mut file = sftp.create(std::path::Path::new("file")).await?;
+        let mut first = Box::pin(file.write(b"first"));
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        let count = file.write(b"z").await?;
+        let payload: Vec<_> = (0_u32..100_000)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        file.write_all(&payload).await?;
+        file.seek(SeekFrom::Start(0)).await?;
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).await?;
+        file.close().await?;
+        tokio::task::spawn_blocking(move || drop(sftp)).await?;
+        assert_eq!(count, 1);
+        let mut expected = b"firstz".to_vec();
+        expected.extend(payload);
+        assert_eq!(actual, expected);
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn changed_channel_write_keeps_exact_payload_under_backpressure() -> Result {
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+
+    use futures::AsyncWrite;
+    testing::server()
+        .exec(
+            "echo",
+            testing::ExecResponse {
+                keep_open: true,
+                echo: true,
+                ..testing::ExecResponse::default()
+            },
+        )
+        .with_server(|addr| async move {
+            let tcp = tokio::net::TcpStream::connect(addr).await?;
+            socket2::SockRef::from(&tcp).set_send_buffer_size(1024)?;
+            let mut session = Session::try_from(tcp)?;
+            session.handshake().await?;
+            session
+                .userauth_password(testing::USERNAME, testing::PASSWORD)
+                .await?;
+            let mut channel = session.channel_session().await?;
+            channel.exec("echo").await?;
+            let mut accepted = 0;
+            let mut pending = false;
+            for _ in 0..4096 {
+                match Pin::new(&mut channel)
+                    .poll_write(&mut Context::from_waker(Waker::noop()), &[b'a'; 1024])
+                {
+                    Poll::Ready(result) => accepted += result?,
+                    Poll::Pending => {
+                        pending = true;
+                        break;
+                    }
+                }
+            }
+            assert!(pending, "test did not reach native backpressure");
+            assert!(matches!(
+                session.block_directions(),
+                ssh2::BlockDirections::Outbound | ssh2::BlockDirections::Both
+            ));
+            assert!(channel.write_window().remaining >= 1024);
+            assert_eq!(channel.write(b"z").await?, 1);
+            channel.send_eof().await?;
+            let mut actual = Vec::new();
+            channel.read_to_end(&mut actual).await?;
+            let mut expected = vec![b'a'; accepted + 1024];
+            expected.push(b'z');
+            assert_eq!(actual, expected);
+            Ok(())
+        })
+        .await?
+}
+
+#[test]
+fn handles_remain_send_and_sync() {
+    fn check<T: Send + Sync>() {}
+    check::<crate::Channel<TokioContext>>();
+    check::<crate::Stream<TokioContext>>();
+    check::<crate::File<TokioContext>>();
+}

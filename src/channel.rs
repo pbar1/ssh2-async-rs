@@ -2,6 +2,8 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 
@@ -15,12 +17,18 @@ use ssh2::ReadWindow;
 use ssh2::WriteWindow;
 
 use crate::RuntimeContext;
+use crate::write::WriteRequest;
 
 /// Async wrapper for [`ssh2::Channel`].
+///
+/// Writes report native progress immediately. An unfinished native write is
+/// retained across polls; flush it before extracting or using native handles.
+/// Reads do not flush outgoing data.
 pub struct Channel<C: RuntimeContext> {
     inner: ssh2::Channel,
     ctx: C,
     read_ctx: C,
+    writes: Arc<Mutex<ChannelWrite>>,
 }
 
 /// Constructors and non-wrapping functions
@@ -28,6 +36,7 @@ impl<C: RuntimeContext> Channel<C> {
     pub(crate) fn new(inner: ssh2::Channel, ctx: C) -> Self {
         Self {
             inner,
+            writes: Arc::new(Mutex::new(ChannelWrite::default())),
             read_ctx: ctx.clone(),
             ctx,
         }
@@ -52,6 +61,20 @@ impl<C: RuntimeContext> Channel<C> {
 /// Async wrappers
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> Channel<C> {
+    async fn flush_pending(&self) -> Result<(), Error> {
+        futures::future::poll_fn(|cx| {
+            self.ctx
+                .with_poll(cx, || self.writes.lock().unwrap().flush())
+        })
+        .await
+        .map_err(|_| {
+            Error::new(
+                crate::consts::ERROR_BAD_SOCKET,
+                "failed completing pending channel write",
+            )
+        })
+    }
+
     pub async fn setenv(&mut self, var: &str, val: &str) -> Result<(), Error> {
         self.ctx.with_async(|| self.inner.setenv(var, val)).await
     }
@@ -123,6 +146,7 @@ impl<C: RuntimeContext> Channel<C> {
     }
 
     pub async fn send_eof(&mut self) -> Result<(), Error> {
+        self.flush_pending().await?;
         self.ctx.with_async(|| self.inner.send_eof()).await
     }
 
@@ -131,6 +155,7 @@ impl<C: RuntimeContext> Channel<C> {
     }
 
     pub async fn close(&mut self) -> Result<(), Error> {
+        self.flush_pending().await?;
         self.ctx.with_async(|| self.inner.close()).await
     }
 
@@ -143,7 +168,7 @@ impl<C: RuntimeContext> Channel<C> {
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> Channel<C> {
     pub fn stderr(&self) -> Stream<C> {
-        Stream::new(self.inner.stderr(), self.ctx.clone(), self.inner.clone())
+        self.stream(1)
     }
 
     pub fn stream(&self, stream_id: i32) -> Stream<C> {
@@ -151,6 +176,8 @@ impl<C: RuntimeContext> Channel<C> {
             self.inner.stream(stream_id),
             self.ctx.clone(),
             self.inner.clone(),
+            stream_id,
+            self.writes.clone(),
         )
     }
 
@@ -194,35 +221,58 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Channel<C> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.stream(0).write(buf))
+        this.ctx.with_poll(cx, || {
+            this.writes
+                .lock()
+                .unwrap()
+                .write(0, this.inner.stream(0), buf)
+        })
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Channel writes are unbuffered; libssh2's flush discards received data.
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.ctx
+            .with_poll(cx, || this.writes.lock().unwrap().flush())
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        std::task::ready!(
+            this.ctx
+                .with_poll(cx, || this.writes.lock().unwrap().flush())
+        )?;
         this.ctx
             .with_poll(cx, || this.inner.close().map_err(io::Error::from))
     }
 }
 
 /// Async wrapper for [`ssh2::Stream`].
+///
+/// Pending writes are shared with the channel and its other streams. Flush
+/// before extracting or using native handles.
 pub struct Stream<C: RuntimeContext> {
     inner: ssh2::Stream,
     channel: ssh2::Channel,
     ctx: C,
     read_ctx: C,
+    id: i32,
+    writes: Arc<Mutex<ChannelWrite>>,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Stream<C> {
-    pub(crate) fn new(inner: ssh2::Stream, ctx: C, channel: ssh2::Channel) -> Self {
+    fn new(
+        inner: ssh2::Stream,
+        ctx: C,
+        channel: ssh2::Channel,
+        stream_id: i32,
+        writes: Arc<Mutex<ChannelWrite>>,
+    ) -> Self {
         Self {
             inner,
             channel,
+            id: stream_id,
+            writes,
             read_ctx: ctx.clone(),
             ctx,
         }
@@ -262,16 +312,61 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Stream<C> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.write(buf))
+        this.ctx.with_poll(cx, || {
+            this.writes
+                .lock()
+                .unwrap()
+                .write(this.id, this.inner.clone(), buf)
+        })
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.ctx
+            .with_poll(cx, || this.writes.lock().unwrap().flush())
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        std::task::ready!(
+            this.ctx
+                .with_poll(cx, || this.writes.lock().unwrap().flush())
+        )?;
         this.ctx
             .with_poll(cx, || this.channel.send_eof().map_err(io::Error::from))
+    }
+}
+
+#[derive(Default)]
+struct ChannelWrite {
+    stream: Option<(i32, ssh2::Stream)>,
+    request: WriteRequest,
+}
+
+impl ChannelWrite {
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some((_, stream)) = &mut self.stream {
+            self.request.flush(|bytes| stream.write(bytes))?;
+        }
+        self.stream = None;
+        Ok(())
+    }
+
+    fn write(&mut self, id: i32, stream: ssh2::Stream, bytes: &[u8]) -> io::Result<usize> {
+        if self
+            .stream
+            .as_ref()
+            .is_some_and(|(previous, _)| *previous != id)
+        {
+            self.flush()?;
+        }
+        let (_, stream) = self.stream.get_or_insert((id, stream));
+        let result = self
+            .request
+            .write(bytes, 32_700, |bytes| stream.write(bytes));
+        if !self.request.is_pending() {
+            self.stream = None;
+        }
+        result
     }
 }

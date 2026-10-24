@@ -13,6 +13,7 @@ mod sftp;
 #[cfg(test)]
 #[allow(dead_code)]
 mod testing;
+mod write;
 
 pub use ssh2;
 

@@ -1921,6 +1921,7 @@ dependencies = [
  "futures",
  "rand 0.10.1",
  "russh",
+ "socket2",
  "ssh2",
  "tokio",
  "tokio-stream",

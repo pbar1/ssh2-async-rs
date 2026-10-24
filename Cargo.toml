@@ -15,6 +15,7 @@ ssh2 = { version = "0.9", default-features = false }
 tokio = { version = "1.53.3", optional = true, default-features = false, features = ["macros", "net", "rt"] }
 
 [dev-dependencies]
+socket2 = "0.6"
 rand = "0.10"
 russh = { version = "0.60", default-features = false, features = ["ring"] }
 tokio-stream = { version = "0.1", features = ["net"] }

@@ -227,6 +227,7 @@ pub struct ExecResponse {
     pub stderr: Vec<u8>,
     pub status: u32,
     pub keep_open: bool,
+    pub echo: bool,
 }
 
 impl ExecResponse {
@@ -236,6 +237,7 @@ impl ExecResponse {
             stderr: Vec::new(),
             status: 0,
             keep_open: false,
+            echo: false,
         }
     }
 }
@@ -249,6 +251,9 @@ struct TestHandler {
     state: Arc<State>,
     scp: HashMap<ChannelId, ScpState>,
     sftp: HashMap<ChannelId, Vec<u8>>,
+    handles: HashMap<u8, String>,
+    next_handle: u8,
+    echo_channels: std::collections::HashSet<ChannelId>,
 }
 
 impl TestHandler {
@@ -257,6 +262,9 @@ impl TestHandler {
             state,
             scp: HashMap::new(),
             sftp: HashMap::new(),
+            handles: HashMap::new(),
+            next_handle: 0,
+            echo_channels: std::collections::HashSet::new(),
         }
     }
 
@@ -382,6 +390,9 @@ impl Handler for TestHandler {
             .get(command.as_ref())
             .cloned()
             .unwrap_or_else(|| unknown_command(&command));
+        if response.echo {
+            self.echo_channels.insert(channel);
+        }
         Self::write_exec_response(channel, &response, session)
     }
 
@@ -408,6 +419,9 @@ impl Handler for TestHandler {
     }
 
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<()> {
+        if self.echo_channels.contains(&channel) {
+            return session.data(channel, data.to_vec());
+        }
         let Some(buffer) = self.sftp.get_mut(&channel) else {
             return self.handle_scp_data(channel, data, session);
         };
@@ -425,10 +439,51 @@ impl Handler for TestHandler {
                     reply.extend(3_u32.to_be_bytes());
                 }
                 3 | 11 => {
+                    let size = u32::from_be_bytes(packet[5..9].try_into().unwrap()) as usize;
+                    let path = String::from_utf8(packet[9..9 + size].to_vec()).unwrap();
+                    self.next_handle = self.next_handle.checked_add(1).unwrap();
+                    self.handles.insert(self.next_handle, path);
                     reply.push(102);
                     reply.extend(&packet[1..5]);
                     reply.extend(1_u32.to_be_bytes());
-                    reply.push(b'h');
+                    reply.push(self.next_handle);
+                }
+                6 => {
+                    let offset =
+                        usize::try_from(u64::from_be_bytes(packet[10..18].try_into().unwrap()))
+                            .unwrap();
+                    let data = &packet[22..];
+                    let mut files = self.state.files.lock().unwrap();
+                    let file = files.entry(self.handles[&packet[9]].clone()).or_default();
+                    file.resize(file.len().max(offset + data.len()), 0);
+                    file[offset..offset + data.len()].copy_from_slice(data);
+                    drop(files);
+                    reply.push(101);
+                    reply.extend(&packet[1..5]);
+                    reply.extend([0; 12]);
+                }
+                5 => {
+                    let offset =
+                        usize::try_from(u64::from_be_bytes(packet[10..18].try_into().unwrap()))
+                            .unwrap();
+                    let count = u32::from_be_bytes(packet[18..22].try_into().unwrap()) as usize;
+                    let files = self.state.files.lock().unwrap();
+                    let file = files
+                        .get(&self.handles[&packet[9]])
+                        .map_or(&[][..], Vec::as_slice);
+                    if offset >= file.len() {
+                        reply.push(101);
+                        reply.extend(&packet[1..5]);
+                        reply.extend(1_u32.to_be_bytes());
+                        reply.extend([0; 8]);
+                    } else {
+                        let data = &file[offset..file.len().min(offset + count)];
+                        reply.push(103);
+                        reply.extend(&packet[1..5]);
+                        reply.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+                        reply.extend(data);
+                    }
+                    drop(files);
                 }
                 8 => {
                     reply.push(105);
@@ -605,6 +660,7 @@ fn unknown_command(command: &str) -> ExecResponse {
         stderr: format!("unknown command: {command}\n").into_bytes(),
         status: 127,
         keep_open: false,
+        echo: false,
     }
 }
 

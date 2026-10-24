@@ -19,6 +19,7 @@ use ssh2::OpenType;
 use ssh2::RenameFlags;
 
 use crate::RuntimeContext;
+use crate::write::WriteRequest;
 
 /// Async wrapper for [`ssh2::Sftp`].
 pub struct Sftp<C: RuntimeContext> {
@@ -165,10 +166,15 @@ impl<C: RuntimeContext> Sftp<C> {
 }
 
 /// Async wrapper for [`ssh2::File`].
+///
+/// Unfinished native writes retain their payload across polls. Flush before
+/// extracting or using native handles. File reads, seeks, metadata requests,
+/// and close complete that file's pending write first.
 pub struct File<C: RuntimeContext> {
     inner: ssh2::File,
     ctx: C,
     read_ctx: C,
+    writes: WriteRequest,
 }
 
 /// Constructors and non-wrapping functions
@@ -178,6 +184,7 @@ impl<C: RuntimeContext> File<C> {
             inner,
             read_ctx: ctx.clone(),
             ctx,
+            writes: WriteRequest::default(),
         }
     }
 
@@ -200,25 +207,44 @@ impl<C: RuntimeContext> File<C> {
 /// Async wrappers
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> File<C> {
+    async fn flush_pending(&mut self) -> Result<(), Error> {
+        futures::future::poll_fn(|cx| {
+            self.ctx
+                .with_poll(cx, || self.writes.flush(|bytes| self.inner.write(bytes)))
+        })
+        .await
+        .map_err(|_| {
+            Error::new(
+                crate::consts::ERROR_BAD_SOCKET,
+                "failed completing pending file write",
+            )
+        })
+    }
+
     pub async fn setstat(&mut self, stat: FileStat) -> Result<(), Error> {
+        self.flush_pending().await?;
         self.ctx
             .with_async(|| self.inner.setstat(stat.clone()))
             .await
     }
 
     pub async fn stat(&mut self) -> Result<FileStat, Error> {
+        self.flush_pending().await?;
         self.ctx.with_async(|| self.inner.stat()).await
     }
 
     pub async fn readdir(&mut self) -> Result<(PathBuf, FileStat), Error> {
+        self.flush_pending().await?;
         self.ctx.with_async(|| self.inner.readdir()).await
     }
 
     pub async fn fsync(&mut self) -> Result<(), Error> {
+        self.flush_pending().await?;
         self.ctx.with_async(|| self.inner.fsync()).await
     }
 
     pub async fn close(&mut self) -> Result<(), Error> {
+        self.flush_pending().await?;
         self.ctx.with_async(|| self.inner.close()).await
     }
 }
@@ -230,6 +256,10 @@ impl<C: RuntimeContext + Unpin> AsyncRead for File<C> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        std::task::ready!(
+            this.ctx
+                .with_poll(cx, || this.writes.flush(|bytes| this.inner.write(bytes)))
+        )?;
         this.read_ctx.with_poll(cx, || this.inner.read(buf))
     }
 }
@@ -241,16 +271,29 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for File<C> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.write(buf))
+        // Keep one SFTP request in flight rather than queuing data beyond the
+        // count returned to AsyncWrite's caller.
+        this.ctx.with_poll(cx, || {
+            this.writes
+                .write(buf, 16 * 1024, |bytes| this.inner.write(bytes))
+        })
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        std::task::ready!(
+            this.ctx
+                .with_poll(cx, || this.writes.flush(|bytes| this.inner.write(bytes)))
+        )?;
         this.ctx.with_poll(cx, || this.inner.flush())
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        std::task::ready!(
+            this.ctx
+                .with_poll(cx, || this.writes.flush(|bytes| this.inner.write(bytes)))
+        )?;
         this.ctx
             .with_poll(cx, || this.inner.close().map_err(io::Error::from))
     }
@@ -263,6 +306,10 @@ impl<C: RuntimeContext + Unpin> AsyncSeek for File<C> {
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
         let this = self.get_mut();
+        std::task::ready!(
+            this.ctx
+                .with_poll(cx, || this.writes.flush(|bytes| this.inner.write(bytes)))
+        )?;
         let (base, offset) = match pos {
             SeekFrom::Start(position) => {
                 return Poll::Ready(this.inner.seek(SeekFrom::Start(position)));
