@@ -133,7 +133,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn window_size(mut self, size: u32) -> Self {
+    pub const fn window_size(mut self, size: u32) -> Self {
         self.window_size = Some(size);
         self
     }
@@ -254,6 +254,7 @@ struct TestHandler {
     handles: HashMap<u8, String>,
     next_handle: u8,
     echo_channels: std::collections::HashSet<ChannelId>,
+    listed_dirs: std::collections::HashSet<u8>,
 }
 
 impl TestHandler {
@@ -265,6 +266,7 @@ impl TestHandler {
             handles: HashMap::new(),
             next_handle: 0,
             echo_channels: std::collections::HashSet::new(),
+            listed_dirs: std::collections::HashSet::new(),
         }
     }
 
@@ -485,6 +487,29 @@ impl Handler for TestHandler {
                     }
                     drop(files);
                 }
+                12 if self.listed_dirs.insert(packet[9]) => {
+                    let prefix = format!("{}/", self.handles[&packet[9]].trim_end_matches('/'));
+                    let files = self.state.files.lock().unwrap();
+                    let mut names: Vec<_> = files
+                        .keys()
+                        .filter_map(|path| path.strip_prefix(&prefix))
+                        .filter(|name| !name.contains('/'))
+                        .map(str::to_owned)
+                        .collect();
+                    drop(files);
+                    names.sort();
+                    names.extend([".".into(), "..".into()]);
+                    reply.push(104);
+                    reply.extend(&packet[1..5]);
+                    reply.extend(u32::try_from(names.len()).unwrap().to_be_bytes());
+                    for name in names {
+                        for _ in 0..2 {
+                            reply.extend(u32::try_from(name.len()).unwrap().to_be_bytes());
+                            reply.extend(name.as_bytes());
+                        }
+                        reply.extend(0_u32.to_be_bytes());
+                    }
+                }
                 8 => {
                     reply.push(105);
                     reply.extend(&packet[1..5]);
@@ -518,7 +543,7 @@ struct ScpSink {
 }
 
 impl ScpSink {
-    fn new(path: String) -> Self {
+    const fn new(path: String) -> Self {
         Self {
             path,
             size: None,
@@ -569,7 +594,7 @@ struct ScpSource {
 }
 
 impl ScpSource {
-    fn new(path: String) -> Self {
+    const fn new(path: String) -> Self {
         Self {
             path,
             phase: ScpSourcePhase::Header,
