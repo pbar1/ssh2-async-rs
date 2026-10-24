@@ -315,6 +315,8 @@ impl TestHandler {
     }
 }
 
+// Keep handler work deferred until polling. The lint was added in Clippy 1.98.
+#[allow(unknown_lints, clippy::unused_async_trait_impl)]
 impl Handler for TestHandler {
     type Error = russh::Error;
 

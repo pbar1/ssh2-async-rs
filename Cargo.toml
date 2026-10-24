@@ -5,6 +5,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Runtime-agnostic async wrapper for ssh2"
 
+[workspace]
+members = ["xtask"]
+
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio"]

@@ -154,7 +154,8 @@ mod tests {
             // Write the file
             let mut remote_file = sess.scp_send(Path::new("remote"), 0o644, 10, None).await?;
             remote_file.write_all(b"1234567890").await?;
-            // Close the channel and wait for the whole content to be transferred
+            // Close the channel and wait for the whole content to be
+            // transferred
             remote_file.send_eof().await?;
             remote_file.wait_eof().await?;
             remote_file.close().await?;
@@ -181,7 +182,8 @@ mod tests {
                 let mut contents = Vec::new();
                 remote_file.read_to_end(&mut contents).await?;
 
-                // Close the channel and wait for the whole content to be transferred
+                // Close the channel and wait for the whole content to be
+                // transferred
                 remote_file.send_eof().await?;
                 remote_file.wait_eof().await?;
                 remote_file.close().await?;

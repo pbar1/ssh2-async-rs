@@ -192,7 +192,8 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Channel<C> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Channel writes are unbuffered; libssh2's flush discards received data.
+        // Channel writes are unbuffered; libssh2's flush discards received
+        // data.
         Poll::Ready(Ok(()))
     }
 

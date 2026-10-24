@@ -98,7 +98,7 @@ async fn readdir_yields_while_waiting_for_entries() -> Result {
         let sftp = session.sftp().await?;
         let entries = sftp.readdir(".").await;
         tokio::task::spawn_blocking(move || drop(sftp)).await?;
-        assert!(entries?.is_empty());
+        assert_eq!(entries?, []);
         Ok(())
     })
     .await?

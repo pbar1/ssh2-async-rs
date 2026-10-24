@@ -19,7 +19,7 @@ jobs:
           components: rustfmt
 
       - name: Format
-        run: cargo +nightly fmt --check
+        run: cargo xtask fmt
 
   test:
     name: Test
@@ -40,7 +40,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Test
-        run: cargo test
+        run: cargo xtask test
 
       - name: Clippy
-        run: cargo clippy --all-targets --no-deps -- -D warnings
+        run: cargo xtask clippy

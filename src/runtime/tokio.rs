@@ -22,7 +22,8 @@ use crate::consts::ERROR_BAD_SOCKET;
 #[derive(Clone)]
 pub struct TokioContext {
     // Fields drop in declaration order: deregister before the last session
-    // reference can close the socket, otherwise Tokio can leak its registration.
+    // reference can close the socket, otherwise Tokio can leak its
+    // registration.
     fd: Arc<AsyncFd<RawFd>>,
     session: ssh2::Session,
 }
