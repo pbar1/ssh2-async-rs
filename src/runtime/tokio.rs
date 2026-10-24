@@ -8,36 +8,133 @@ use std::task::Poll;
 use ssh2::BlockDirections;
 use ssh2::Error;
 use tokio::io::Interest;
-use tokio::io::unix::AsyncFd;
-use tokio::io::unix::AsyncFdReadyGuard;
+use tokio::net::TcpStream;
+use tokio::net::UnixStream;
 
 use super::RuntimeContext;
-use crate::consts::ERROR_BAD_SOCKET;
 
-/// Tokio runtime context.
+/// Owned transport accepted by the Tokio backend.
 ///
-/// Contains an `AsyncFd` wrapped within an [`Arc`] so it can be cheaply
-/// cloned to session derivatives. This avoids repeated syscalls (ie,
-/// `epoll_ctl`) that would cause kernel lock contention under high concurrency.
+/// Standard-library and Tokio TCP/Unix streams convert into this type.
+/// Standard streams are set to nonblocking before registration.
+pub enum TokioTransport {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl From<TcpStream> for TokioTransport {
+    fn from(stream: TcpStream) -> Self {
+        Self::Tcp(stream)
+    }
+}
+
+impl From<UnixStream> for TokioTransport {
+    fn from(stream: UnixStream) -> Self {
+        Self::Unix(stream)
+    }
+}
+
+impl TryFrom<std::net::TcpStream> for TokioTransport {
+    type Error = io::Error;
+
+    fn try_from(stream: std::net::TcpStream) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        TcpStream::from_std(stream).map(Self::Tcp)
+    }
+}
+
+impl TryFrom<std::os::unix::net::UnixStream> for TokioTransport {
+    type Error = io::Error;
+
+    fn try_from(stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        UnixStream::from_std(stream).map(Self::Unix)
+    }
+}
+
+impl AsRawFd for TokioTransport {
+    fn as_raw_fd(&self) -> RawFd {
+        match self {
+            Self::Tcp(stream) => stream.as_raw_fd(),
+            Self::Unix(stream) => stream.as_raw_fd(),
+        }
+    }
+}
+
+struct SharedTransport(Arc<TokioTransport>);
+
+impl AsRawFd for SharedTransport {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl TokioTransport {
+    async fn ready(&self, interest: Interest) -> io::Result<()> {
+        let ready = match self {
+            Self::Tcp(stream) => stream.ready(interest).await?,
+            Self::Unix(stream) => stream.ready(interest).await?,
+        };
+        if ready.is_readable() || ready.is_read_closed() {
+            self.clear_ready(Interest::READABLE);
+        }
+        if ready.is_writable() || ready.is_write_closed() {
+            self.clear_ready(Interest::WRITABLE);
+        }
+        Ok(())
+    }
+
+    fn clear_ready(&self, interest: Interest) {
+        // libssh2 performs the I/O itself. Clear the event consumed by its
+        // retry without performing any additional socket I/O here.
+        let clear = || Err::<(), _>(io::ErrorKind::WouldBlock.into());
+        let _ = match self {
+            Self::Tcp(stream) => stream.try_io(interest, clear),
+            Self::Unix(stream) => stream.try_io(interest, clear),
+        };
+    }
+
+    fn poll_ready(&self, cx: &mut Context<'_>, interest: Interest) -> Poll<io::Result<()>> {
+        let result = match (self, interest.is_readable()) {
+            (Self::Tcp(stream), true) => stream.poll_read_ready(cx),
+            (Self::Tcp(stream), false) => stream.poll_write_ready(cx),
+            (Self::Unix(stream), true) => stream.poll_read_ready(cx),
+            (Self::Unix(stream), false) => stream.poll_write_ready(cx),
+        };
+        result.map_ok(|()| self.clear_ready(interest))
+    }
+}
+
+/// Tokio runtime context sharing one owned socket with the native session.
+///
+/// Clones share the existing Tokio registration. No descriptor is duplicated
+/// or registered through `AsyncFd`.
 #[derive(Clone)]
 pub struct TokioContext {
-    // Fields drop in declaration order: deregister before the last session
-    // reference can close the socket, otherwise Tokio can leak its registration.
-    fd: Arc<AsyncFd<RawFd>>,
+    socket: Arc<TokioTransport>,
     session: ssh2::Session,
 }
 
+impl TokioContext {
+    fn check_transport(&self) -> io::Result<()> {
+        if self.session.as_raw_fd() == self.socket.as_raw_fd() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native transport was replaced; create a new async session",
+            ))
+        }
+    }
+}
+
 impl RuntimeContext for TokioContext {
-    fn new(session: ssh2::Session) -> Result<Self, Error> {
-        let fd =
-            AsyncFd::with_interest(session.as_raw_fd(), Interest::READABLE | Interest::WRITABLE)
-                .map_err(|_| {
-                    Error::new(ERROR_BAD_SOCKET, "failed extracting AsyncFd from session")
-                })?;
-        Ok(Self {
-            fd: Arc::new(fd),
-            session,
-        })
+    type Transport = TokioTransport;
+
+    fn new(mut session: ssh2::Session, transport: Self::Transport) -> Result<Self, Error> {
+        let socket = Arc::new(transport);
+        session.set_tcp_stream(SharedTransport(socket.clone()));
+        Ok(Self { socket, session })
     }
 
     fn block_directions(&self) -> BlockDirections {
@@ -45,120 +142,82 @@ impl RuntimeContext for TokioContext {
     }
 
     async fn wait_ready(&self) -> io::Result<()> {
+        self.check_transport()?;
         match self.block_directions() {
             BlockDirections::None => tokio::task::yield_now().await,
-            BlockDirections::Inbound => {
-                self.fd.readable().await?.clear_ready();
-            }
-            BlockDirections::Outbound => {
-                self.fd.writable().await?.clear_ready();
-            }
+            BlockDirections::Inbound => self.socket.ready(Interest::READABLE).await?,
+            BlockDirections::Outbound => self.socket.ready(Interest::WRITABLE).await?,
             BlockDirections::Both => {
-                tokio::select! {
-                    result = self.fd.readable() => result?.clear_ready(),
-                    result = self.fd.writable() => result?.clear_ready(),
-                }
+                self.socket
+                    .ready(Interest::READABLE | Interest::WRITABLE)
+                    .await?;
             }
         }
-        Ok(())
+        self.check_transport()
     }
 
     fn poll_ready(&self, cx: &mut Context) -> Poll<io::Result<()>> {
+        self.check_transport()?;
         match self.block_directions() {
             BlockDirections::None => {
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            BlockDirections::Inbound => clear_ready(self.fd.poll_read_ready(cx)),
-            BlockDirections::Outbound => clear_ready(self.fd.poll_write_ready(cx)),
+            BlockDirections::Inbound => self.socket.poll_ready(cx, Interest::READABLE),
+            BlockDirections::Outbound => self.socket.poll_ready(cx, Interest::WRITABLE),
             BlockDirections::Both => {
-                if let Poll::Ready(r) = clear_ready(self.fd.poll_read_ready(cx)) {
-                    return Poll::Ready(r);
+                if let ready @ Poll::Ready(_) = self.socket.poll_ready(cx, Interest::READABLE) {
+                    return ready;
                 }
-                clear_ready(self.fd.poll_write_ready(cx))
+                self.socket.poll_ready(cx, Interest::WRITABLE)
             }
         }
     }
 }
 
-fn clear_ready(
-    poll_result: Poll<io::Result<AsyncFdReadyGuard<'_, RawFd>>>,
-) -> Poll<io::Result<()>> {
-    poll_result.map_ok(|mut guard| {
-        guard.clear_ready();
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::os::unix::net::UnixStream;
-    use std::sync::OnceLock;
-    use std::sync::Weak;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
 
-    use super::Arc;
-    use super::AsRawFd;
-    use super::AsyncFd;
-    use super::RawFd;
-    use super::RuntimeContext;
-    use super::TokioContext;
+    use super::*;
 
-    struct DropCheckedStream {
-        stream: UnixStream,
-        registration: Arc<OnceLock<Weak<AsyncFd<RawFd>>>>,
-        dropped: Arc<AtomicBool>,
-    }
-
-    impl AsRawFd for DropCheckedStream {
-        fn as_raw_fd(&self) -> RawFd {
-            self.stream.as_raw_fd()
-        }
-    }
-
-    impl Drop for DropCheckedStream {
-        fn drop(&mut self) {
-            assert!(
-                self.registration.get().unwrap().upgrade().is_none(),
-                "socket dropped before its AsyncFd"
-            );
-            self.dropped.store(true, Ordering::SeqCst);
-        }
+    #[tokio::test]
+    async fn native_session_keeps_the_owned_registration() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let native = ssh2::Session::new().unwrap();
+        let ctx = TokioContext::new(native.clone(), stream.try_into().unwrap()).unwrap();
+        let socket = Arc::downgrade(&ctx.socket);
+        let clone = ctx.clone();
+        drop(ctx);
+        drop(clone);
+        assert!(socket.upgrade().is_some());
+        assert_eq!(
+            peer.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(native);
+        assert!(socket.upgrade().is_none());
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn deregisters_before_closing_socket() {
-        check_drop_order(false);
-    }
-
-    #[tokio::test]
-    async fn last_clone_deregisters_before_closing_socket() {
-        check_drop_order(true);
-    }
-
-    fn check_drop_order(clone: bool) {
+    async fn replaced_transport_is_rejected() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         stream.set_nonblocking(true).unwrap();
-        let registration = Arc::new(OnceLock::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let mut session = ssh2::Session::new().unwrap();
-        session.set_tcp_stream(DropCheckedStream {
-            stream,
-            registration: Arc::clone(&registration),
-            dropped: Arc::clone(&dropped),
-        });
-        let ctx = TokioContext::new(session).unwrap();
-        registration.set(Arc::downgrade(&ctx.fd)).unwrap();
-
-        if clone {
-            let cloned = ctx.clone();
-            assert!(Arc::ptr_eq(&ctx.fd, &cloned.fd));
-            drop(ctx);
-            assert!(!dropped.load(Ordering::SeqCst));
-            drop(cloned);
-        } else {
-            drop(ctx);
-        }
-        assert!(dropped.load(Ordering::SeqCst));
+        let mut native = ssh2::Session::new().unwrap();
+        let ctx = TokioContext::new(native.clone(), stream.try_into().unwrap()).unwrap();
+        let (replacement, _peer) = UnixStream::pair().unwrap();
+        native.set_tcp_stream(replacement);
+        assert_eq!(
+            ctx.wait_ready().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(
+            ctx.poll_ready(&mut Context::from_waker(std::task::Waker::noop()))
+                .is_ready()
+        );
     }
 }

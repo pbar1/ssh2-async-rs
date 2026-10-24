@@ -42,3 +42,10 @@ async fn main() -> Result<(), ssh2::Error> {
 
 [ssh2]: https://github.com/alexcrichton/ssh2-rs
 [tokio]: https://tokio.rs/
+
+Runtime contexts receive an owned transport through `RuntimeContext::Transport`
+and `RuntimeContext::new(session, transport)`. The Tokio backend shares the
+socket's existing registration with the native session; it neither duplicates
+the descriptor nor registers a borrowed descriptor. `from_blocking` accepts an
+unconnected native session and the transport as separate arguments. Established
+native sessions cannot supply their socket ownership through ssh2's API.

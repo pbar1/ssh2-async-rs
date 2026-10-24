@@ -29,30 +29,45 @@ pub struct Session<C: RuntimeContext> {
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Session<C> {
-    /// Wraps an [`ssh2::Session`] with async bindings.
+    /// Wraps an [`ssh2::Session`] and installs the supplied owned transport.
+    ///
+    /// Use an unconnected native session, before starting its handshake.
     ///
     /// # Errors
     ///
-    /// Returns an error if the runtime context cannot be created from blocking
-    /// session. This can happen if the transport has not yet been set with
-    /// [`ssh2::Session::set_tcp_stream`].
-    pub fn from_blocking(inner: ssh2::Session) -> Result<Self, Error> {
+    /// Returns an error if the transport cannot be converted or registered.
+    /// Pass the transport here instead of calling `set_tcp_stream` beforehand.
+    pub fn from_blocking(
+        inner: ssh2::Session,
+        transport: impl TryInto<C::Transport>,
+    ) -> Result<Self, Error> {
+        if inner.host_key().is_some() {
+            return Err(Error::new(
+                ERROR_INVAL,
+                "session has already started its handshake",
+            ));
+        }
         inner.set_blocking(false);
-        let ctx = C::new(inner.clone())?;
+        let transport = transport
+            .try_into()
+            .map_err(|_| Error::new(ERROR_BAD_SOCKET, "failed converting transport"))?;
+        let ctx = C::new(inner.clone(), transport)?;
         Ok(Self { inner, ctx })
     }
 
     /// Creates an async session from the given transport stream.
     ///
+    /// The runtime takes ownership of the transport. The Tokio backend accepts
+    /// standard-library or Tokio TCP/Unix streams and shares one registration
+    /// with libssh2. Replacing transport through a native session alias is
+    /// unsupported; construct a new async session instead.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the underlying `libssh2` library has not been
-    /// initialized (unlikely, as [`ssh2`] does this automatically).
-    #[cfg(unix)]
-    pub fn from_stream(stream: impl std::os::fd::AsRawFd + 'static) -> Result<Self, Error> {
-        let mut inner = ssh2::Session::new()?;
-        inner.set_tcp_stream(stream);
-        Self::from_blocking(inner)
+    /// Returns an error if native initialization, transport conversion, or
+    /// runtime registration fails.
+    pub fn from_stream(stream: impl TryInto<C::Transport>) -> Result<Self, Error> {
+        Self::from_blocking(ssh2::Session::new()?, stream)
     }
 
     /// Returns the wrapped inner.
@@ -76,9 +91,6 @@ impl TryFrom<tokio::net::TcpStream> for Session<TokioContext> {
     type Error = Error;
 
     fn try_from(stream: tokio::net::TcpStream) -> Result<Self, Self::Error> {
-        let stream = stream
-            .into_std()
-            .map_err(|_| Error::new(ERROR_BAD_SOCKET, "failed converting Tokio TCP stream"))?;
         Self::from_stream(stream)
     }
 }

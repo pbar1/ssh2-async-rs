@@ -2,6 +2,7 @@
 
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 mod agent;
 mod channel;
@@ -22,6 +23,8 @@ pub use self::listener::Listener;
 pub use self::runtime::RuntimeContext;
 #[cfg(feature = "tokio")]
 pub use self::runtime::TokioContext;
+#[cfg(all(feature = "tokio", unix))]
+pub use self::runtime::TokioTransport;
 pub use self::session::Session;
 pub use self::sftp::File;
 pub use self::sftp::Sftp;

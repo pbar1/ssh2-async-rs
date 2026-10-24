@@ -11,6 +11,8 @@ use ssh2::Error;
 
 #[cfg(feature = "tokio")]
 pub use self::tokio::TokioContext;
+#[cfg(all(feature = "tokio", unix))]
+pub use self::tokio::TokioTransport;
 use crate::consts::ERROR_BAD_SOCKET;
 use crate::consts::ERROR_EAGAIN;
 
@@ -21,13 +23,18 @@ use crate::consts::ERROR_EAGAIN;
 ///
 /// [`Session`]: crate::Session
 pub trait RuntimeContext: Clone + Send + Sync + Sized {
-    /// Create runtime-specific context from a session.
+    /// Owned transport accepted by this runtime.
+    type Transport: Send;
+
+    /// Install the transport and create runtime-specific context for a session.
     ///
     /// # Errors
     ///
-    /// Returns an error if the runtime context could not be extracted from the
-    /// session. This usually only happens if transport has not yet been set.
-    fn new(session: ssh2::Session) -> Result<Self, Error>;
+    /// Returns an error if the transport cannot be registered with the runtime.
+    /// Implementations must keep the registration's socket alive until
+    /// deregistration, including when a native session alias replaces
+    /// transport.
+    fn new(session: ssh2::Session, transport: Self::Transport) -> Result<Self, Error>;
 
     /// Get the blocking direction of the session.
     fn block_directions(&self) -> BlockDirections;
