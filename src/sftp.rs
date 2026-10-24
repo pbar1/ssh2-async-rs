@@ -168,12 +168,17 @@ impl<C: RuntimeContext> Sftp<C> {
 pub struct File<C: RuntimeContext> {
     inner: ssh2::File,
     ctx: C,
+    read_ctx: C,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> File<C> {
-    pub(crate) const fn new(inner: ssh2::File, ctx: C) -> Self {
-        Self { inner, ctx }
+    pub(crate) fn new(inner: ssh2::File, ctx: C) -> Self {
+        Self {
+            inner,
+            read_ctx: ctx.clone(),
+            ctx,
+        }
     }
 
     /// Returns the wrapped inner.
@@ -225,7 +230,7 @@ impl<C: RuntimeContext + Unpin> AsyncRead for File<C> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.read(buf))
+        this.read_ctx.with_poll(cx, || this.inner.read(buf))
     }
 }
 

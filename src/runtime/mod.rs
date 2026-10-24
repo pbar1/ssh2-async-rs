@@ -43,6 +43,9 @@ pub trait RuntimeContext: Clone + Send + Sync + Sized {
     fn wait_ready(&self) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Poll for session readiness.
+    ///
+    /// Clones must retain independent poll waiters. Each I/O direction uses
+    /// its own clone so one pending operation cannot replace another's waker.
     fn poll_ready(&self, cx: &mut Context) -> Poll<io::Result<()>>;
 
     /// Wrap a nonblocking function with retries until it succeeds.

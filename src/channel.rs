@@ -20,12 +20,17 @@ use crate::RuntimeContext;
 pub struct Channel<C: RuntimeContext> {
     inner: ssh2::Channel,
     ctx: C,
+    read_ctx: C,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Channel<C> {
-    pub(crate) const fn new(inner: ssh2::Channel, ctx: C) -> Self {
-        Self { inner, ctx }
+    pub(crate) fn new(inner: ssh2::Channel, ctx: C) -> Self {
+        Self {
+            inner,
+            read_ctx: ctx.clone(),
+            ctx,
+        }
     }
 
     /// Returns the wrapped inner.
@@ -177,7 +182,8 @@ impl<C: RuntimeContext + Unpin> AsyncRead for Channel<C> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.stream(0).read(buf))
+        this.read_ctx
+            .with_poll(cx, || this.inner.stream(0).read(buf))
     }
 }
 
@@ -208,14 +214,16 @@ pub struct Stream<C: RuntimeContext> {
     inner: ssh2::Stream,
     channel: ssh2::Channel,
     ctx: C,
+    read_ctx: C,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Stream<C> {
-    pub(crate) const fn new(inner: ssh2::Stream, ctx: C, channel: ssh2::Channel) -> Self {
+    pub(crate) fn new(inner: ssh2::Stream, ctx: C, channel: ssh2::Channel) -> Self {
         Self {
             inner,
             channel,
+            read_ctx: ctx.clone(),
             ctx,
         }
     }
@@ -243,7 +251,7 @@ impl<C: RuntimeContext + Unpin> AsyncRead for Stream<C> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.read(buf))
+        this.read_ctx.with_poll(cx, || this.inner.read(buf))
     }
 }
 
