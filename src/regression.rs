@@ -11,6 +11,7 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 async fn connect(addr: SocketAddr) -> Result<Session<TokioContext>> {
     let mut session = Session::try_from(tokio::net::TcpStream::connect(addr).await?)?;
+    session.as_inner().set_timeout(200);
     session.handshake().await?;
     session
         .userauth_password(testing::USERNAME, testing::PASSWORD)
@@ -35,4 +36,36 @@ async fn flush_preserves_channel_input() -> Result {
             Ok(())
         })
         .await?
+}
+
+#[tokio::test]
+async fn close_waits_for_channel_and_file_replies() -> Result {
+    testing::with_sftp_server(|addr| async move {
+        let session = connect(addr).await?;
+        let mut channel = session.channel_session().await?;
+        let channel_result = AsyncWriteExt::close(&mut channel).await;
+        let sftp = session.sftp().await?;
+        let mut file = sftp.open("file").await?;
+        let file_result = AsyncWriteExt::close(&mut file).await;
+        // Drop before asserting so upstream's blocking cleanup has a live peer.
+        drop(file);
+        drop(sftp);
+        assert!(channel_result.is_ok(), "{channel_result:?}");
+        assert!(file_result.is_ok(), "{file_result:?}");
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn closing_stream_sends_eof() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let channel = session.channel_session().await?;
+        let mut stream = channel.stream(0);
+        stream.close().await?;
+        assert!(stream.write(b"x").await.is_err());
+        Ok(())
+    })
+    .await?
 }

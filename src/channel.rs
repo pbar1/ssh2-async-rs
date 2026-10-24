@@ -138,11 +138,15 @@ impl<C: RuntimeContext> Channel<C> {
 #[allow(clippy::missing_errors_doc)]
 impl<C: RuntimeContext> Channel<C> {
     pub fn stderr(&self) -> Stream<C> {
-        Stream::new(self.inner.stderr(), self.ctx.clone())
+        Stream::new(self.inner.stderr(), self.ctx.clone(), self.inner.clone())
     }
 
     pub fn stream(&self, stream_id: i32) -> Stream<C> {
-        Stream::new(self.inner.stream(stream_id), self.ctx.clone())
+        Stream::new(
+            self.inner.stream(stream_id),
+            self.ctx.clone(),
+            self.inner.clone(),
+        )
     }
 
     pub fn exit_status(&self) -> Result<i32, Error> {
@@ -195,20 +199,25 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Channel<C> {
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.ctx
-            .with_poll(cx, || this.inner.close().map_err(io::Error::other))
+            .with_poll(cx, || this.inner.close().map_err(io::Error::from))
     }
 }
 
 /// Async wrapper for [`ssh2::Stream`].
 pub struct Stream<C: RuntimeContext> {
     inner: ssh2::Stream,
+    channel: ssh2::Channel,
     ctx: C,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Stream<C> {
-    pub(crate) const fn new(inner: ssh2::Stream, ctx: C) -> Self {
-        Self { inner, ctx }
+    pub(crate) const fn new(inner: ssh2::Stream, ctx: C, channel: ssh2::Channel) -> Self {
+        Self {
+            inner,
+            channel,
+            ctx,
+        }
     }
 
     /// Returns the wrapped inner.
@@ -252,7 +261,9 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Stream<C> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.ctx
+            .with_poll(cx, || this.channel.send_eof().map_err(io::Error::from))
     }
 }

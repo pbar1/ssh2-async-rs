@@ -232,7 +232,7 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for File<C> {
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.ctx
-            .with_poll(cx, || this.inner.close().map_err(io::Error::other))
+            .with_poll(cx, || this.inner.close().map_err(io::Error::from))
     }
 }
 

@@ -237,6 +237,7 @@ struct State {
 struct TestHandler {
     state: Arc<State>,
     scp: HashMap<ChannelId, ScpState>,
+    sftp: HashMap<ChannelId, Vec<u8>>,
 }
 
 impl TestHandler {
@@ -244,6 +245,7 @@ impl TestHandler {
         Self {
             state,
             scp: HashMap::new(),
+            sftp: HashMap::new(),
         }
     }
 
@@ -368,8 +370,69 @@ impl Handler for TestHandler {
         Self::write_exec_response(channel, &response, session)
     }
 
+    async fn channel_eof(&mut self, channel: ChannelId, session: &mut Session) -> Result<()> {
+        session.eof(channel)?;
+        session.close(channel)
+    }
+
+    async fn channel_close(&mut self, channel: ChannelId, session: &mut Session) -> Result<()> {
+        session.close(channel)
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<()> {
+        if name == "sftp" {
+            self.sftp.insert(channel, Vec::new());
+            session.channel_success(channel)?;
+        }
+        Ok(())
+    }
+
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<()> {
-        self.handle_scp_data(channel, data, session)
+        let Some(buffer) = self.sftp.get_mut(&channel) else {
+            return self.handle_scp_data(channel, data, session);
+        };
+        buffer.extend_from_slice(data);
+        while buffer.len() >= 4 {
+            let len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
+            if buffer.len() < len + 4 {
+                break;
+            }
+            let packet: Vec<_> = buffer.drain(..len + 4).skip(4).collect();
+            let mut reply = Vec::new();
+            match packet[0] {
+                1 => {
+                    reply.push(2);
+                    reply.extend(3_u32.to_be_bytes());
+                }
+                3 | 11 => {
+                    reply.push(102);
+                    reply.extend(&packet[1..5]);
+                    reply.extend(1_u32.to_be_bytes());
+                    reply.push(b'h');
+                }
+                8 => {
+                    reply.push(105);
+                    reply.extend(&packet[1..5]);
+                    reply.extend(1_u32.to_be_bytes());
+                    reply.extend(12_u64.to_be_bytes());
+                }
+                _ => {
+                    reply.push(101);
+                    reply.extend(&packet[1..5]);
+                    reply.extend(u32::from(packet[0] == 12).to_be_bytes());
+                    reply.extend([0; 8]);
+                }
+            }
+            let mut framed = u32::try_from(reply.len()).unwrap().to_be_bytes().to_vec();
+            framed.extend(reply);
+            session.data(channel, framed)?;
+        }
+        Ok(())
     }
 }
 
@@ -527,4 +590,29 @@ fn unknown_command(command: &str) -> ExecResponse {
         stderr: format!("unknown command: {command}\n").into_bytes(),
         status: 127,
     }
+}
+
+// A separate reactor lets tests finish upstream's blocking SFTP destructors.
+pub async fn with_sftp_server<F, Fut, T>(client: F) -> Result<T>
+where
+    F: FnOnce(SocketAddr) -> Fut,
+    Fut: Future<Output = T>,
+{
+    let (ready_tx, ready_rx) = futures::channel::oneshot::channel();
+    let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+    let worker = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let server = server().bind().await.unwrap();
+                ready_tx.send(server.addr()).unwrap();
+                tokio::select! { _ = server.serve_one() => {}, _ = stop_rx => {} }
+            });
+    });
+    let result = client(ready_rx.await.unwrap()).await;
+    let _ = stop_tx.send(());
+    worker.join().unwrap();
+    Ok(result)
 }
