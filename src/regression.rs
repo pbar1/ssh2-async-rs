@@ -315,3 +315,89 @@ async fn cancelled_session_request_does_not_poison_existing_channels() -> Result
         })
         .await?
 }
+
+#[tokio::test]
+async fn abandoned_sftp_read_rejects_conflicts_without_stranding_handles() -> Result {
+    testing::server()
+        .file("a", "A")
+        .file("b", "B")
+        .with_server(|addr| async move {
+            let session = connect(addr).await?;
+            let sftp = session.sftp().await?;
+            let mut a = sftp.open("a").await?;
+            let mut b = sftp.open("b").await?;
+            let mut a_byte = [0];
+            let mut reading = Box::pin(a.read(&mut a_byte));
+            assert!(futures::poll!(&mut reading).is_pending());
+            drop(reading);
+            let conflict =
+                tokio::time::timeout(std::time::Duration::from_millis(200), b.read(&mut [0])).await;
+            let a_result = a.read_exact(&mut a_byte).await;
+            let mut b_byte = [0];
+            let b_result = b.read_exact(&mut b_byte).await;
+            a.close().await?;
+            b.close().await?;
+            tokio::task::spawn_blocking(move || drop(sftp)).await?;
+            assert!(
+                matches!(conflict, Ok(Err(_))),
+                "conflicting read was reused or left waiting: {conflict:?}"
+            );
+            a_result?;
+            b_result?;
+            assert_eq!(a_byte, *b"A");
+            assert_eq!(b_byte, *b"B");
+            Ok(())
+        })
+        .await?
+}
+
+#[tokio::test]
+async fn cancelled_sftp_open_does_not_invalidate_the_session() -> Result {
+    testing::with_server(|addr| async move {
+        let session = connect(addr).await?;
+        let sftp = session.sftp().await?;
+        let mut first = Box::pin(sftp.open("first"));
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        let next = sftp.open("second").await;
+        let code = next.as_ref().err().map(ssh2::Error::code);
+        session.channel_session().await?;
+        tokio::task::spawn_blocking(move || {
+            drop(next);
+            drop(sftp);
+        })
+        .await?;
+        assert_eq!(code, Some(ssh2::ErrorCode::Session(-39)));
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn seek_cannot_replace_an_unfinished_file_read() -> Result {
+    use std::io::SeekFrom;
+
+    use futures::AsyncSeekExt;
+    testing::server()
+        .file("file", "AB")
+        .with_server(|addr| async move {
+            let session = connect(addr).await?;
+            let sftp = session.sftp().await?;
+            let mut file = sftp.open("file").await?;
+            let mut byte = [0];
+            let mut read = Box::pin(file.read(&mut byte));
+            assert!(futures::poll!(&mut read).is_pending());
+            drop(read);
+            let rejected = file.seek(SeekFrom::Start(1)).await.is_err();
+            file.read_exact(&mut byte).await?;
+            assert_eq!(byte, *b"A");
+            file.seek(SeekFrom::Start(1)).await?;
+            file.read_exact(&mut byte).await?;
+            file.close().await?;
+            tokio::task::spawn_blocking(move || drop(sftp)).await?;
+            assert!(rejected);
+            assert_eq!(byte, *b"B");
+            Ok(())
+        })
+        .await?
+}
