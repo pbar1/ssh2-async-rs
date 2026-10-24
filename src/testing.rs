@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use russh::Channel;
 use russh::ChannelId;
+use russh::keys::Algorithm;
 use russh::keys::PrivateKey;
 use russh::keys::PublicKeyBase64;
 use russh::keys::agent::client::AgentClient;
@@ -28,28 +29,6 @@ type Result<T> = std::result::Result<T, russh::Error>;
 
 pub const USERNAME: &str = "username";
 pub const PASSWORD: &str = "password";
-
-const HOST_KEY: &str = r"
------BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYgAAAJgAIAxdACAM
-XQAAAAtzc2gtZWQyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYg
-AAAEC2BsIi0QwW2uFscKTUUXNHLsYX4FxlaSDSblbAj7WR7bM+rvN+ot98qgEN796jTiQf
-ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
------END OPENSSH PRIVATE KEY-----
-";
-
-const USER_KEY: &str = r"
------BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACA+/q51/y/PfVFNDP2Z0j9j0829+sI3wHybdibXPzuqsQAAAJh/FAkdfxQJ
-HQAAAAtzc2gtZWQyNTUxOQAAACA+/q51/y/PfVFNDP2Z0j9j0829+sI3wHybdibXPzuqsQ
-AAAEBf9AF7cqXX+8dFnoAefD88l2TISDiuY7c2KLzhBPvZLj7+rnX/L899UU0M/ZnSP2PT
-zb36wjfAfJt2Jtc/O6qxAAAAFHNzaDItYXN5bmMtdGVzdC11c2VyAQ==
------END OPENSSH PRIVATE KEY-----
-";
-pub const USER_PUBLIC_KEY: &str =
-    r"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID7+rnX/L899UU0M/ZnSP2PTzb36wjfAfJt2Jtc/O6qx";
 
 static AGENT: OnceCell<AgentServer> = OnceCell::const_new();
 
@@ -76,11 +55,16 @@ where
 
 pub struct AgentServer {
     socket_path: PathBuf,
+    public_key: String,
 }
 
 impl AgentServer {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    pub fn public_key(&self) -> &str {
+        &self.public_key
     }
 
     async fn spawn() -> Result<Self> {
@@ -119,7 +103,8 @@ impl AgentServer {
             .recv()
             .map_err(|_| std::io::Error::other("test SSH agent thread stopped during startup"))??;
 
-        let key = PrivateKey::from_openssh(USER_KEY)?;
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?;
+        let public_key = key.public_key().to_openssh()?;
         let stream = UnixStream::connect(&socket_path).await?;
         let mut client = AgentClient::connect(stream);
         client.add_identity(&key, &[]).await?;
@@ -133,7 +118,10 @@ impl AgentServer {
             std::env::set_var("SSH_AUTH_SOCK", &socket_path);
         }
 
-        Ok(Self { socket_path })
+        Ok(Self {
+            socket_path,
+            public_key,
+        })
     }
 }
 
@@ -162,7 +150,7 @@ impl Builder {
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             inactivity_timeout: Some(Duration::from_secs(30)),
-            keys: vec![PrivateKey::from_openssh(HOST_KEY)?],
+            keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?],
             ..Config::default()
         });
         let state = Arc::new(State {

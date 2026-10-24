@@ -1919,6 +1919,7 @@ name = "ssh2-async"
 version = "0.0.3"
 dependencies = [
  "futures",
+ "rand 0.10.1",
  "russh",
  "ssh2",
  "tokio",

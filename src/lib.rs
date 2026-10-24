@@ -53,7 +53,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_agent() -> Result<()> {
-        let _agent = testing::agent().await?;
+        let agent_server = testing::agent().await?;
 
         testing::with_server(|server_addr| async move {
             // Almost all APIs require a `Session` to be available
@@ -71,7 +71,7 @@ mod tests {
                 let pubkey = identity.blob();
                 assert_eq!(
                     testing::public_key_openssh(pubkey)?,
-                    testing::USER_PUBLIC_KEY
+                    agent_server.public_key()
                 );
             }
 
@@ -192,3 +192,6 @@ mod tests {
             .await?
     }
 }
+
+#[cfg(all(test, feature = "tokio", unix))]
+mod regression;

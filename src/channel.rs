@@ -187,9 +187,9 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Channel<C> {
         this.ctx.with_poll(cx, || this.inner.stream(0).write(buf))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.stream(0).flush())
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Channel writes are unbuffered; libssh2's flush discards received data.
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -248,9 +248,8 @@ impl<C: RuntimeContext + Unpin> AsyncWrite for Stream<C> {
         this.ctx.with_poll(cx, || this.inner.write(buf))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        this.ctx.with_poll(cx, || this.inner.flush())
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
