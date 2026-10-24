@@ -25,9 +25,9 @@ use crate::consts::ERROR_INVAL;
 ///
 /// Session requests are serialized because libssh2 retains request state across
 /// `EAGAIN`. Cancelling one after it starts prevents further session requests;
-/// existing channels remain usable. Finish pending writes before issuing other
-/// requests: libssh2 can retain a partially sent packet for the whole
-/// connection.
+/// data I/O, EOF waits, and close remain outside that gate. Finish pending
+/// writes before issuing other requests: libssh2 can retain a partially sent
+/// packet for the whole connection.
 pub struct Session<C: RuntimeContext> {
     inner: ssh2::Session,
     ctx: C,

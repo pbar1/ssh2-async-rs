@@ -24,6 +24,10 @@ use crate::write::WriteRequest;
 /// Writes report native progress immediately. An unfinished native write is
 /// retained across polls; flush it before extracting or using native handles.
 /// Reads do not flush outgoing data.
+///
+/// Requesting controls share a reply gate across the session. Cancelling one
+/// prevents further requests on that gate; recreate the session to issue more.
+/// Data I/O, EOF waits, and close stay outside that gate.
 pub struct Channel<C: RuntimeContext> {
     inner: ssh2::Channel,
     ctx: C,
