@@ -29,13 +29,19 @@ pub struct Channel<C: RuntimeContext> {
     ctx: C,
     read_ctx: C,
     writes: Arc<Mutex<ChannelWrite>>,
+    requests: Arc<futures::lock::Mutex<bool>>,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Channel<C> {
-    pub(crate) fn new(inner: ssh2::Channel, ctx: C) -> Self {
+    pub(crate) fn new(
+        inner: ssh2::Channel,
+        ctx: C,
+        requests: Arc<futures::lock::Mutex<bool>>,
+    ) -> Self {
         Self {
             inner,
+            requests,
             writes: Arc::new(Mutex::new(ChannelWrite::default())),
             read_ctx: ctx.clone(),
             ctx,
@@ -75,8 +81,16 @@ impl<C: RuntimeContext> Channel<C> {
         })
     }
 
+    async fn with_request<T: Send>(
+        &mut self,
+        mut func: impl FnMut(&mut ssh2::Channel) -> Result<T, Error> + Send,
+    ) -> Result<T, Error> {
+        crate::runtime::request::with_request(&self.ctx, &self.requests, || func(&mut self.inner))
+            .await
+    }
+
     pub async fn setenv(&mut self, var: &str, val: &str) -> Result<(), Error> {
-        self.ctx.with_async(|| self.inner.setenv(var, val)).await
+        self.with_request(|channel| channel.setenv(var, val)).await
     }
 
     pub async fn request_pty(
@@ -85,8 +99,7 @@ impl<C: RuntimeContext> Channel<C> {
         mode: Option<PtyModes>,
         dim: Option<(u32, u32, u32, u32)>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.request_pty(term, mode.clone(), dim))
+        self.with_request(|channel| channel.request_pty(term, mode.clone(), dim))
             .await
     }
 
@@ -97,30 +110,25 @@ impl<C: RuntimeContext> Channel<C> {
         width_px: Option<u32>,
         height_px: Option<u32>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| {
-                self.inner
-                    .request_pty_size(width, height, width_px, height_px)
-            })
+        self.with_request(|channel| channel.request_pty_size(width, height, width_px, height_px))
             .await
     }
 
     pub async fn request_auth_agent_forwarding(&mut self) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.request_auth_agent_forwarding())
+        self.with_request(ssh2::Channel::request_auth_agent_forwarding)
             .await
     }
 
     pub async fn exec(&mut self, command: &str) -> Result<(), Error> {
-        self.ctx.with_async(|| self.inner.exec(command)).await
+        self.with_request(|channel| channel.exec(command)).await
     }
 
     pub async fn shell(&mut self) -> Result<(), Error> {
-        self.ctx.with_async(|| self.inner.shell()).await
+        self.with_request(ssh2::Channel::shell).await
     }
 
     pub async fn subsystem(&mut self, system: &str) -> Result<(), Error> {
-        self.ctx.with_async(|| self.inner.subsystem(system)).await
+        self.with_request(|channel| channel.subsystem(system)).await
     }
 
     pub async fn process_startup(
@@ -128,8 +136,7 @@ impl<C: RuntimeContext> Channel<C> {
         request: &str,
         message: Option<&str>,
     ) -> Result<(), Error> {
-        self.ctx
-            .with_async(|| self.inner.process_startup(request, message))
+        self.with_request(|channel| channel.process_startup(request, message))
             .await
     }
 

@@ -404,3 +404,73 @@ async fn seek_cannot_replace_an_unfinished_file_read() -> Result {
         })
         .await?
 }
+
+#[tokio::test]
+async fn independent_channels_complete_on_different_threads() -> Result {
+    testing::server()
+        .exec("data", testing::ExecResponse::stdout("result"))
+        .with_server(|addr| async move {
+            let session = connect(addr).await?;
+            let mut workers = Vec::new();
+            // ssh2's last-channel Drop bypasses its session mutex. Keep
+            // native owners here to test I/O independently of that
+            // known upstream race, then destroy them after all workers finish.
+            let mut owners = Vec::new();
+            for _ in 0..8 {
+                let mut channel = session.channel_session().await?;
+                owners.push(channel.as_inner().clone());
+                let runtime = tokio::runtime::Handle::current();
+                workers.push(std::thread::spawn(move || {
+                    let _entered = runtime.enter();
+                    futures::executor::block_on(async {
+                        channel
+                            .exec("data")
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let mut bytes = Vec::new();
+                        channel
+                            .read_to_end(&mut bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        channel.close().await.map_err(|error| error.to_string())?;
+                        Ok::<_, String>(bytes)
+                    })
+                }));
+            }
+            let joined = tokio::task::spawn_blocking(move || {
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            for result in tokio::time::timeout(std::time::Duration::from_secs(2), joined).await?? {
+                assert_eq!(result.unwrap(), b"result");
+            }
+            drop(owners);
+            Ok(())
+        })
+        .await?
+}
+
+#[tokio::test]
+async fn cancelled_channel_request_keeps_data_io_and_close_usable() -> Result {
+    testing::server()
+        .exec("data", testing::ExecResponse::stdout("ready"))
+        .with_server(|addr| async move {
+            let session = connect(addr).await?;
+            let mut channel = session.channel_session().await?;
+            let mut exec = Box::pin(channel.exec("data"));
+            assert!(futures::poll!(&mut exec).is_pending());
+            drop(exec);
+            let mut other = session.channel_session().await?;
+            let rejected = other.exec("data").await.err().map(|error| error.code());
+            let mut actual = Vec::new();
+            channel.read_to_end(&mut actual).await?;
+            channel.close().await?;
+            other.close().await?;
+            assert_eq!(rejected, Some(ssh2::ErrorCode::Session(-39)));
+            assert_eq!(actual, b"ready");
+            Ok(())
+        })
+        .await?
+}

@@ -32,6 +32,7 @@ pub struct Session<C: RuntimeContext> {
     inner: ssh2::Session,
     ctx: C,
     requests: futures::lock::Mutex<bool>,
+    channel_requests: std::sync::Arc<futures::lock::Mutex<bool>>,
 }
 
 /// Constructors and non-wrapping functions
@@ -63,6 +64,7 @@ impl<C: RuntimeContext> Session<C> {
             inner,
             ctx,
             requests: futures::lock::Mutex::new(false),
+            channel_requests: std::sync::Arc::new(futures::lock::Mutex::new(false)),
         })
     }
 
@@ -111,6 +113,13 @@ impl TryFrom<tokio::net::TcpStream> for Session<TokioContext> {
 impl<C: RuntimeContext> Session<C> {
     async fn with_request<T: Send>(
         &self,
+        func: impl FnMut() -> Result<T, Error> + Send,
+    ) -> Result<T, Error> {
+        crate::runtime::request::with_request(&self.ctx, &self.requests, func).await
+    }
+
+    async fn with_channel_request<T: Send>(
+        &self,
         mut func: impl FnMut() -> Result<T, Error> + Send,
     ) -> Result<T, Error> {
         let mut pending = self.requests.lock().await;
@@ -120,14 +129,12 @@ impl<C: RuntimeContext> Session<C> {
                 "previous session request was cancelled; create a new session",
             ));
         }
-        self.ctx
-            .with_async(|| {
-                let result = func();
-                *pending =
-                    matches!(&result, Err(error) if error.code() == crate::consts::ERROR_EAGAIN);
-                result
-            })
-            .await
+        crate::runtime::request::with_request(&self.ctx, &self.channel_requests, || {
+            let result = func();
+            *pending = matches!(&result, Err(error) if error.code() == crate::consts::ERROR_EAGAIN);
+            result
+        })
+        .await
     }
 
     pub async fn handshake(&mut self) -> Result<(), Error> {
@@ -239,7 +246,11 @@ impl<C: RuntimeContext> Session<C> {
 
     pub async fn channel_session(&self) -> Result<Channel<C>, Error> {
         let channel = self.with_request(|| self.inner.channel_session()).await?;
-        Ok(Channel::new(channel, self.ctx.clone()))
+        Ok(Channel::new(
+            channel,
+            self.ctx.clone(),
+            self.channel_requests.clone(),
+        ))
     }
 
     pub async fn channel_direct_tcpip(
@@ -251,7 +262,11 @@ impl<C: RuntimeContext> Session<C> {
         let channel = self
             .with_request(|| self.inner.channel_direct_tcpip(host, port, src))
             .await?;
-        Ok(Channel::new(channel, self.ctx.clone()))
+        Ok(Channel::new(
+            channel,
+            self.ctx.clone(),
+            self.channel_requests.clone(),
+        ))
     }
 
     pub async fn channel_direct_streamlocal(
@@ -262,7 +277,11 @@ impl<C: RuntimeContext> Session<C> {
         let channel = self
             .with_request(|| self.inner.channel_direct_streamlocal(socket_path, src))
             .await?;
-        Ok(Channel::new(channel, self.ctx.clone()))
+        Ok(Channel::new(
+            channel,
+            self.ctx.clone(),
+            self.channel_requests.clone(),
+        ))
     }
 
     pub async fn channel_forward_listen(
@@ -277,7 +296,10 @@ impl<C: RuntimeContext> Session<C> {
                     .channel_forward_listen(remote_port, host, queue_maxsize)
             })
             .await?;
-        Ok((Listener::new(listener, self.ctx.clone()), port))
+        Ok((
+            Listener::new(listener, self.ctx.clone(), self.channel_requests.clone()),
+            port,
+        ))
     }
 
     pub async fn channel_open(
@@ -293,12 +315,21 @@ impl<C: RuntimeContext> Session<C> {
                     .channel_open(channel_type, window_size, packet_size, message)
             })
             .await?;
-        Ok(Channel::new(channel, self.ctx.clone()))
+        Ok(Channel::new(
+            channel,
+            self.ctx.clone(),
+            self.channel_requests.clone(),
+        ))
     }
 
     pub async fn scp_recv(&self, path: &Path) -> Result<(Channel<C>, ScpFileStat), Error> {
-        let (channel, stat) = self.with_request(|| self.inner.scp_recv(path)).await?;
-        Ok((Channel::new(channel, self.ctx.clone()), stat))
+        let (channel, stat) = self
+            .with_channel_request(|| self.inner.scp_recv(path))
+            .await?;
+        Ok((
+            Channel::new(channel, self.ctx.clone(), self.channel_requests.clone()),
+            stat,
+        ))
     }
 
     pub async fn scp_send(
@@ -309,13 +340,17 @@ impl<C: RuntimeContext> Session<C> {
         times: Option<(u64, u64)>,
     ) -> Result<Channel<C>, Error> {
         let channel = self
-            .with_request(|| self.inner.scp_send(remote_path, mode, size, times))
+            .with_channel_request(|| self.inner.scp_send(remote_path, mode, size, times))
             .await?;
-        Ok(Channel::new(channel, self.ctx.clone()))
+        Ok(Channel::new(
+            channel,
+            self.ctx.clone(),
+            self.channel_requests.clone(),
+        ))
     }
 
     pub async fn sftp(&self) -> Result<Sftp<C>, Error> {
-        let sftp = self.with_request(|| self.inner.sftp()).await?;
+        let sftp = self.with_channel_request(|| self.inner.sftp()).await?;
         Ok(Sftp::new(sftp, self.ctx.clone()))
     }
 

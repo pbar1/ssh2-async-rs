@@ -420,6 +420,7 @@ impl Handler for TestHandler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the test protocol replies in one match.
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<()> {
         if self.echo_channels.contains(&channel) {
             return session.data(channel, data.to_vec());

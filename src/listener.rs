@@ -7,12 +7,21 @@ use crate::RuntimeContext;
 pub struct Listener<C: RuntimeContext> {
     inner: ssh2::Listener,
     ctx: C,
+    requests: std::sync::Arc<futures::lock::Mutex<bool>>,
 }
 
 /// Constructors and non-wrapping functions
 impl<C: RuntimeContext> Listener<C> {
-    pub(crate) const fn new(inner: ssh2::Listener, ctx: C) -> Self {
-        Self { inner, ctx }
+    pub(crate) const fn new(
+        inner: ssh2::Listener,
+        ctx: C,
+        requests: std::sync::Arc<futures::lock::Mutex<bool>>,
+    ) -> Self {
+        Self {
+            inner,
+            ctx,
+            requests,
+        }
     }
 
     /// Returns the wrapped inner.
@@ -37,6 +46,10 @@ impl<C: RuntimeContext> Listener<C> {
     /// See [`ssh2::Listener::accept`]
     pub async fn accept(&mut self) -> Result<Channel<C>, Error> {
         let channel = self.ctx.with_async(|| self.inner.accept()).await?;
-        Ok(Channel::new(channel, self.ctx.clone()))
+        Ok(Channel::new(
+            channel,
+            self.ctx.clone(),
+            self.requests.clone(),
+        ))
     }
 }
